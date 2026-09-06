@@ -10,14 +10,14 @@
 * `core:llm` is platform-agnostic (no `android.*` imports). Auth storage,
   Keystore, network policy live in `app/`.
 * `core:agent` depends only on `core:llm` + coroutines/serialization.
-  No OpenMinis imports — `app/.../harness/HarnessBridge.kt` owns adaptation.
-* `app/` keeps the OpenMinis runtime (sandbox, offloads, permissions).
-  Never weaken `OffloadPermissionManager` — pi has no permission system;
-  do not copy that weakness.
+  No app-runtime imports — `app/.../harness/HarnessBridge.kt` owns adaptation.
+* `app/` owns the device runtime (sandbox, offloads, permissions).
+  Never weaken `OffloadPermissionManager` — the loop has no permission
+  model of its own; the offload gate is the authority.
 
 ## Correctness
 
-* `AgentLoop` semantics mirror pi `agent-loop.ts`: every-result-`terminate`
+* `AgentLoop` contract: every-result-`terminate`
   required to stop a batch; `length` stop fails the whole tool batch;
   unknown tools become error results, never throws.
 * `ToolLoopDetector` thresholds stay `warning < critical < circuitBreaker`;
@@ -28,6 +28,6 @@
 
 ## Deps
 
-* Pin exact versions for direct external deps (mirrors pi supply-chain rule).
+* Pin exact versions for direct external deps.
 * `minSdk 26`, `arm64-v8a` only, Kotlin 2.1.0, coroutines 1.9.0,
   serialization-json 1.7.3, okhttp 4.12.0 — bump together across modules.
