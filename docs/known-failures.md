@@ -21,6 +21,19 @@ CR-folding whitespace expectations (`expected:<complete[ ]> but
 was:<complete[]>`, etc.). Upstream sanitizer code, untouched. Suspected
 runner cause: line-ending/whitespace handling under the CI JDK.
 
+## `lint` job (informational, not a merge gate)
+
+`:app:lintDebug` crashes inside AGP 8.7.3's own detectors —
+`IncompatibleClassChangeError` (`KaCallableMemberCall ... interface was
+expected`: lint's bundled UAST API vs Kotlin 2.1 K2 classes). Reproduces on
+pristine upstream and locally. Whack-a-mole verified: disabling
+`RememberInComposition` / `FrequentlyChangingValue` /
+`NullSafeMutableLiveData` (note: the historic config used the detector class
+name; the real issue id is `NullSafeMutableLiveData`) just exposes the next
+crasher (`AutoboxingStateCreationDetector`, same family). The toolchain skew
+is unbounded, so lint runs `continue-on-error` until the AGP upgrade. The
+`unit` job's `assembleDebug` step is the compile gate for app main.
+
 ## CI policy
 
 * `unit` job passes `-PanharnessSkipEnvTests` (excludes exactly these two

@@ -41,6 +41,8 @@ jobs:
         run: ./gradlew :core:llm:testDebugUnitTest :core:agent:testDebugUnitTest --console=plain
       - name: App unit tests (minus documented env failures, see docs/known-failures.md)
         run: ./gradlew :app:testDebugUnitTest -PanharnessSkipEnvTests --console=plain
+      - name: Debug APK (compiles app main incl. HarnessBridge)
+        run: ./gradlew :app:assembleDebug --console=plain
   known-failing:
     # Visibility only: the 18 tests in docs/known-failures.md fail on
     # pristine upstream too. Never gates the build; never silently skipped.
@@ -97,7 +99,13 @@ jobs:
           ./deps/build_proot.sh
           ./scripts/prepare_android_sandbox.sh
   lint:
+    # Informational only: AGP 8.7.3 lint detectors crash with
+    # IncompatibleClassChangeError against Kotlin 2.1 (see
+    # docs/known-failures.md). Kept running for visibility; not a merge gate
+    # until the AGP upgrade. The assembleDebug step in `unit` is the
+    # compile gate for app main.
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4

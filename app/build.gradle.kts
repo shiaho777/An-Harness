@@ -138,6 +138,18 @@ android {
         // a fixed detector (tracked at issuetracker.google.com/388538014).
         checkReleaseBuilds = false
         disable += "NonNullableMutableLiveData"
+        // An-Harness: the detector above registers under issue id
+        // "NullSafeMutableLiveData" (lint's own crash message says so) —
+        // belt and suspenders alongside the historic entry.
+        disable += "NullSafeMutableLiveData"
+        // An-Harness: AGP 8.7.3 ships Compose detectors
+        // (RememberInComposition, FrequentlyChangingValue) that throw
+        // IncompatibleClassChangeError against the Compose BOM 2025.09.00
+        // runtime — same detector/toolchain skew class as above, but these
+        // crash inside their own UAST visitor (not dispatch phase), so
+        // disabling the issue IDs keeps their detectors from running at
+        // all. Reproduces on pristine upstream; re-enable on AGP upgrade.
+        disable += listOf("RememberInComposition", "FrequentlyChangingValue")
     }
 }
 
