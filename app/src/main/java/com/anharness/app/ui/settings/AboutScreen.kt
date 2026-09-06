@@ -94,6 +94,13 @@ fun AboutScreen(onBack: () -> Unit) {
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(horizontal = 24.dp),
             )
+            Text(
+                stringResource(R.string.about_harness_mission),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 24.dp),
+            )
         }
 
         SettingsSection(header = stringResource(R.string.about_links)) {
