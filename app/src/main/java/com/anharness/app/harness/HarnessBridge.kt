@@ -145,6 +145,28 @@ object HarnessBridge {
         isError = !success,
     )
 
+    /**
+     * Pilot entry point for the ChatViewModel: execute one `file_read` call
+     * through the `core:agent` adapter. Args conversion (org.json String →
+     * kotlinx JsonObject) lives here so the ViewModel never touches kotlinx.
+     * Throws on malformed args — the caller owns fallback policy.
+     */
+    suspend fun executeFileRead(
+        toolCallId: String,
+        argsJson: String,
+        context: Context,
+        sessionId: String,
+    ): ToolExecutionResult {
+        val args = kotlinx.serialization.json.Json.parseToJsonElement(argsJson).jsonObject
+        val adapter = fileTools(context) { sessionId }
+            .first { it.definition.name == FileReadTool.NAME }
+        val out = adapter.execute(AgentToolCall(toolCallId, FileReadTool.NAME, args))
+        val title = runCatching {
+            org.json.JSONObject(argsJson).optString("tool_title", FileReadTool.NAME)
+        }.getOrDefault(FileReadTool.NAME)
+        return ToolExecutionResult(output = out.text, success = !out.isError, toolTitle = title)
+    }
+
     // ── loop-guard hooks (ToolLoopDetector as pi hooks) ────────────
 
     /** One instance per session — matches ToolLoopDetector's contract. */

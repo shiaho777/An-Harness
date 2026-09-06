@@ -13,6 +13,11 @@ app/libs/*.aar
 deps/build/
 app/src/main/assets/alpine-minirootfs.tar.gz
 app/src/main/assets/proot-aarch64
+# libproot.so is built by deps/build_proot.sh; the two pinned Termux
+# loaders are the only vendored .so (mirrors upstream policy).
+app/src/main/jniLibs/arm64-v8a/*.so
+!app/src/main/jniLibs/arm64-v8a/libproot-loader.so
+!app/src/main/jniLibs/arm64-v8a/libproot-loader32.so
 app/provider-customization.properties
 app/src/debug/assets/debug-skill/
 app/src/main/assets/bashism/

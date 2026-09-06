@@ -1581,6 +1581,8 @@
     <string name="slash_thinking_subtitle">Thinking %1$s — tap to toggle</string>
     <string name="slash_thinking_unsupported">Not supported by current model</string>
     <string name="slash_clear_subtitle">Clear all messages in this session</string>
+    <string name="slash_harness_on">Harness on (file_read via core:agent) — tap to toggle</string>
+    <string name="slash_harness_off">Harness off (legacy tools) — tap to toggle</string>
     <string name="thinking_level_off">Off</string>
     <string name="thinking_level_low">Low</string>
     <string name="thinking_level_medium">Medium</string>

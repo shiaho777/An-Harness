@@ -39,6 +39,14 @@ evals/        regression evals (faux-provider harness)
 * `AgentSessionStore` (JSONL + fork/clone) and `SkillStore`
   (metadata-in-context, body-on-use) land the pi session/skill model.
 
+## Pilot: `/harness` (default off)
+
+`/harness` toggles routing `file_read` through the `core:agent` adapters
+(`AgentLoopPrefs`, persisted). Detector precheck, preflight, recording and
+overlay are untouched — only the executor swaps, with legacy fallback on
+error. See `docs/known-failures.md` for the CI-excluded env failures
+(identical on pristine upstream).
+
 ## Build
 
 Requirements: JDK 17, Android SDK (compileSdk 36), NDK r28+ (sandbox only).

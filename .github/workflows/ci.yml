@@ -6,6 +6,8 @@ on:
 jobs:
   unit:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_NDK_HOME: ${{ github.workspace }}/ndk-tmp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -13,8 +15,87 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: false
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          "$(go env GOPATH)/bin/gomobile" init
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Install NDK r28
+        run: |
+          sdkmanager --install "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - name: Build rclone.aar (flatDir dep, not vendored)
+        run: |
+          ./deps/build_rclone_android.sh
+          mkdir -p app/libs
+          cp deps/build/rclone/rclone.aar app/libs/
+      - name: Dummy provider-customization (public mirror has no secrets)
+        run: |
+          cp app/provider-customization.properties.example app/provider-customization.properties
+          echo "ANTHROPIC_OAUTH_IDENTIFIER_PROMPT=ci-dummy" >> app/provider-customization.properties
       - name: Core unit tests (no device, no keys)
         run: ./gradlew :core:llm:testDebugUnitTest :core:agent:testDebugUnitTest --console=plain
+      - name: App unit tests (minus documented env failures, see docs/known-failures.md)
+        run: ./gradlew :app:testDebugUnitTest -PanharnessSkipEnvTests --console=plain
+  known-failing:
+    # Visibility only: the 18 tests in docs/known-failures.md fail on
+    # pristine upstream too. Never gates the build; never silently skipped.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: false
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          "$(go env GOPATH)/bin/gomobile" init
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Install NDK r28
+        run: |
+          sdkmanager --install "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - name: Build rclone.aar (flatDir dep, not vendored)
+        run: |
+          ./deps/build_rclone_android.sh
+          mkdir -p app/libs
+          cp deps/build/rclone/rclone.aar app/libs/
+      - name: Dummy provider-customization (public mirror has no secrets)
+        run: |
+          cp app/provider-customization.properties.example app/provider-customization.properties
+          echo "ANTHROPIC_OAUTH_IDENTIFIER_PROMPT=ci-dummy" >> app/provider-customization.properties
+      - name: Known env failures (informational)
+        run: >
+          ./gradlew :app:testDebugUnitTest
+          --tests "com.anharness.app.provider.OpenAIProviderTest"
+          --tests "com.anharness.app.sandbox.TerminalSanitizerTest"
+          --console=plain
+  sandbox-tools:
+    # Validates the Task-2 repaired scripts on Linux: proot cross-compile
+    # from committed deps/proot + Alpine rootfs fetch.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK r28
+        run: |
+          sdkmanager --install "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - name: Build proot + fetch Alpine rootfs
+        run: |
+          ./deps/build_proot.sh
+          ./scripts/prepare_android_sandbox.sh
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -24,5 +105,27 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: false
+      - name: Install gomobile
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          "$(go env GOPATH)/bin/gomobile" init
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Install NDK r28
+        run: |
+          sdkmanager --install "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+      - name: Build rclone.aar (flatDir dep, not vendored)
+        run: |
+          ./deps/build_rclone_android.sh
+          mkdir -p app/libs
+          cp deps/build/rclone/rclone.aar app/libs/
+      - name: Dummy provider-customization (public mirror has no secrets)
+        run: |
+          cp app/provider-customization.properties.example app/provider-customization.properties
+          echo "ANTHROPIC_OAUTH_IDENTIFIER_PROMPT=ci-dummy" >> app/provider-customization.properties
       - name: Android lint (app)
         run: ./gradlew :app:lintDebug --console=plain

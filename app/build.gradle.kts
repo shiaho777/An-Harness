@@ -101,6 +101,21 @@ android {
         unitTests.isReturnDefaultValues = true
     }
 
+    // An-Harness: `-PanharnessSkipEnvTests` drops the two classes that fail
+    // on upstream too in container/JDK CI runners (MockWebServer
+    // empty-response reads + CR-folding whitespace; see
+    // docs/known-failures.md). They still run locally by default and in the
+    // CI `known-failing` job (continue-on-error) for visibility — never
+    // silently skipped.
+    if (project.hasProperty("anharnessSkipEnvTests")) {
+        tasks.withType<org.gradle.api.tasks.testing.Test> {
+            filter {
+                excludeTestsMatching("com.anharness.app.provider.OpenAIProviderTest")
+                excludeTestsMatching("com.anharness.app.sandbox.TerminalSanitizerTest")
+            }
+        }
+    }
+
     // [T-android-downgrade-compat] MigrationTestHelper loads the exported
     // schema JSON from the TEST APK's assets, not from the project directory —
     // without this it fails with "Cannot find the schema file in the assets

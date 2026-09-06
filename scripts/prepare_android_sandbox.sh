@@ -3,7 +3,7 @@
 # Prepare Android sandbox assets:
 #   1. Download Alpine Linux aarch64 minirootfs
 #   2. Download PRoot aarch64 static binary from Termux packages
-#   3. Place both into src/android/app/src/main/assets/
+#   3. Place both into app/src/main/assets/
 #
 # Usage: ./scripts/prepare_android_sandbox.sh
 #
@@ -12,7 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ASSETS_DIR="$PROJECT_ROOT/src/android/app/src/main/assets"
+ASSETS_DIR="$PROJECT_ROOT/app/src/main/assets"
 
 ALPINE_VERSION="3.21"
 ALPINE_RELEASE="3.21.3"

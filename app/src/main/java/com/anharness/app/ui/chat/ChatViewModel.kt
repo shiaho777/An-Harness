@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lightbulb
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Extension
@@ -1462,6 +1463,22 @@ class ChatViewModel(
     }
 
     /**
+     * An-Harness P1 pilot: route `file_read` through the `core:agent` loop
+     * adapters (HarnessBridge) instead of the legacy direct call. APP-LEVEL
+     * and persisted (AgentLoopPrefs, default off). Guard rails around the
+     * executor (loop-detector precheck, preflight, recording, overlay) are
+     * untouched — only the executor swaps, with legacy fallback on error.
+     */
+    internal val _useAgentLoop =
+        MutableStateFlow(com.anharness.app.data.AgentLoopPrefs.isEnabled())
+    val useAgentLoop: StateFlow<Boolean> = _useAgentLoop.asStateFlow()
+
+    fun setUseAgentLoop(enabled: Boolean) {
+        com.anharness.app.data.AgentLoopPrefs.setEnabled(context, enabled)
+        _useAgentLoop.value = enabled
+    }
+
+    /**
      * Auto-compact toggle state. APP-LEVEL and persisted
      * (AutoCompactPrefs / iOS UserDefaults "autoCompactOnThreshold").
      *
@@ -1785,6 +1802,12 @@ class ChatViewModel(
             title = "Thinking",
             subtitle = "",
         ),
+        SlashCommand(
+            id = "harness",
+            icon = Icons.Default.Hub,
+            title = "Harness",
+            subtitle = "",
+        ),
     )
 
     // [T-android-split-chat] filteredSlashCommands / updateSlashMenuState /
@@ -1845,6 +1868,7 @@ class ChatViewModel(
             "compact" -> compactAll()
             "memory" -> toggleMemoryEnabled()
             "thinking" -> toggleThinking()
+            "harness" -> toggleAgentLoop()
             "clear" -> _clearChatConfirmRequested.value = true
             else -> AppLogger.info(TAG, "[Slash] unrecognized id=${cmd.id} — no dispatch")
         }
@@ -1873,6 +1897,17 @@ class ChatViewModel(
         appendSystemInfo(
             text = "Memory writes ${if (newValue) "enabled" else "disabled"}. Reads are unaffected.",
             iconKind = "memory",
+        )
+    }
+
+    /** Toggle the AgentLoop pilot (currently: `file_read` via HarnessBridge). */
+    private fun toggleAgentLoop() {
+        val newValue = !_useAgentLoop.value
+        setUseAgentLoop(newValue)
+        appendSystemInfo(
+            text = "Agent harness ${if (newValue) "enabled" else "disabled"}" +
+                " (pilot: file_read via core:agent, legacy fallback on error).",
+            iconKind = "harness",
         )
     }
 
@@ -9147,7 +9182,25 @@ class ChatViewModel(
 
         return when (name) {
             FileReadTool.NAME -> {
-                val result = FileReadTool.execute(argsJson, activeSessionId, context)
+                // An-Harness P1 pilot: same tool, same args, same post-processing —
+                // only the executor swaps when the flag is on. Detector precheck,
+                // preflight, recording and overlay below are untouched.
+                val result = if (_useAgentLoop.value) {
+                    runCatching {
+                        com.anharness.app.harness.HarnessBridge.executeFileRead(
+                            toolCallId = toolId,
+                            argsJson = argsJson,
+                            context = context,
+                            sessionId = activeSessionId,
+                        )
+                    }.getOrElse { e ->
+                        AppLogger.warning("ChatViewModel",
+                            "harness file_read failed, legacy fallback: ${e.message}")
+                        FileReadTool.execute(argsJson, activeSessionId, context)
+                    }
+                } else {
+                    FileReadTool.execute(argsJson, activeSessionId, context)
+                }
                 // Record skill usage when SKILL.md under /var/minis/skills/<id>/ is read.
                 if (result.success) {
                     runCatching {

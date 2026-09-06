@@ -269,6 +269,9 @@ class MinisApp : Application(), ImageLoaderFactory {
         // never pass through a ViewModel.
         com.anharness.app.data.FastModePrefs.prime(this)
 
+        // An-Harness P1 pilot: AgentLoop file_read toggle (default off).
+        com.anharness.app.data.AgentLoopPrefs.prime(this)
+
         // Warm the auto-compact flag the same way: the pre-send context check
         // and the in-chat one-tap opt-in both read it from places that have no
         // Activity context.

@@ -36,10 +36,10 @@ set -e
 #   ./build_proot.sh distclean # also remove vendored talloc source
 #
 # Output:
-#   src/android/app/src/main/assets/proot-aarch64
-#   src/android/app/src/main/jniLibs/arm64-v8a/libproot.so
-#   src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so
-#   src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader32.so
+#   app/src/main/assets/proot-aarch64
+#   app/src/main/jniLibs/arm64-v8a/libproot.so
+#   app/src/main/jniLibs/arm64-v8a/libproot-loader.so
+#   app/src/main/jniLibs/arm64-v8a/libproot-loader32.so
 #
 # Note on reproducibility: these artifacts are NOT byte-identical across NDK
 # releases — the loader's .text differs between toolchain generations (the
@@ -53,11 +53,11 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROOT_DIR="$SCRIPT_DIR/proot"
 TALLOC_DIR="$SCRIPT_DIR/talloc"
 BUILD_DIR="$SCRIPT_DIR/build/proot-android"
-ASSETS_DIR="$PROJECT_ROOT/src/android/app/src/main/assets"
+ASSETS_DIR="$PROJECT_ROOT/app/src/main/assets"
 OUTPUT_BIN="$ASSETS_DIR/proot-aarch64"
 # The APK also ships proot as a native library (extracted to
 # app's nativeLibraryDir at install time). Keep both in sync.
-JNILIBS_DIR="$PROJECT_ROOT/src/android/app/src/main/jniLibs/arm64-v8a"
+JNILIBS_DIR="$PROJECT_ROOT/app/src/main/jniLibs/arm64-v8a"
 JNILIBS_BIN="$JNILIBS_DIR/libproot.so"
 
 # talloc version pinned to a known-good release. Single-file build avoids
@@ -65,7 +65,7 @@ JNILIBS_BIN="$JNILIBS_DIR/libproot.so"
 TALLOC_VERSION="2.4.2"
 TALLOC_TARBALL_URL="https://download.samba.org/pub/talloc/talloc-${TALLOC_VERSION}.tar.gz"
 
-# Android target. minSdk=26 in src/android/app/build.gradle.kts.
+# Android target. minSdk=26 in app/build.gradle.kts.
 ANDROID_API=26
 ANDROID_ABI="arm64-v8a"
 NDK_TRIPLE="aarch64-linux-android"
@@ -272,9 +272,11 @@ build_proot() {
     # Note: Makefile's default CPPFLAGS adds `-D_FILE_OFFSET_BITS=64
     # -D_GNU_SOURCE -I. -I$(VPATH)` — we must preserve -I. since proot
     # sources use paths like `#include "execve/elf.h"`.
-    local cppflags="-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -DARG_MAX=131072 -I$TALLOC_DIR"
+    # NOTE (An-Harness): repo paths may contain spaces — wrap them in single
+    # quotes so make's /bin/sh re-parses each -I/-L as one word.
+    local cppflags="-D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE -I. -DARG_MAX=131072 -I'$TALLOC_DIR'"
     local cflags="-O2 -Wall -Wextra -fPIE"
-    local ldflags="-Wl,-z,noexecstack -pie -L$BUILD_DIR -ltalloc"
+    local ldflags="-Wl,-z,noexecstack -pie -L'$BUILD_DIR' -ltalloc"
 
     (
         cd "$PROOT_DIR/src"
@@ -378,10 +380,10 @@ install_asset() {
     have64=$(shasum -a 256 "$JNILIBS_DIR/libproot-loader.so" 2>/dev/null | awk '{print $1}')
     have32=$(shasum -a 256 "$JNILIBS_DIR/libproot-loader32.so" 2>/dev/null | awk '{print $1}')
     if [ "$have64" != "$want64" ]; then
-        log_error "libproot-loader.so is NOT the vendored Termux build (sha256=${have64:-missing}). Restore: git checkout -- src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so"
+        log_error "libproot-loader.so is NOT the vendored Termux build (sha256=${have64:-missing}). Restore: git checkout -- app/src/main/jniLibs/arm64-v8a/libproot-loader.so"
     fi
     if [ "$have32" != "$want32" ]; then
-        log_error "libproot-loader32.so is NOT the vendored Termux build (sha256=${have32:-missing}). Restore: git checkout -- src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader32.so"
+        log_error "libproot-loader32.so is NOT the vendored Termux build (sha256=${have32:-missing}). Restore: git checkout -- app/src/main/jniLibs/arm64-v8a/libproot-loader32.so"
     fi
     log_success "Verified vendored Termux loaders (sha256-pinned): libproot-loader.so, libproot-loader32.so"
 }

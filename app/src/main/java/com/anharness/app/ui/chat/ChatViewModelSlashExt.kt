@@ -126,6 +126,12 @@ internal fun ChatViewModel.filteredSlashCommands(): List<SlashCommand> {
             "clear" -> cmd.copy(
                 subtitle = context.getString(R.string.slash_clear_subtitle),
             )
+            "harness" -> cmd.copy(
+                subtitle = context.getString(
+                    if (_useAgentLoop.value) R.string.slash_harness_on
+                    else R.string.slash_harness_off,
+                ),
+            )
             else -> cmd
         }
     }
