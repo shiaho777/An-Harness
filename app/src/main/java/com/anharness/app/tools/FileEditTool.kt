@@ -1,6 +1,7 @@
 package com.anharness.app.tools
 
 import android.content.Context
+import com.anharness.agent.FuzzyMatch
 import com.anharness.app.data.model.AgentToolDefinition
 import com.anharness.app.data.model.AgentToolParam
 import com.anharness.app.sandbox.PRootKernel
@@ -58,40 +59,32 @@ object FileEditTool {
 
             val content = file.readText()
 
-            // Count occurrences
-            var count = 0
-            var searchFrom = 0
-            while (true) {
-                val idx = content.indexOf(oldString, searchFrom)
-                if (idx < 0) break
-                count++
-                searchFrom = idx + oldString.length
+            // Exact match first, then normalized fuzzy fallback (smart quotes,
+            // unicode dashes/spaces, trailing whitespace, CRLF drift) — port of
+            // pi edit-diff semantics via core:agent FuzzyMatch.
+            when (val edit = FuzzyMatch.applyStringEdit(content, oldString, newString, replaceAll)) {
+                is FuzzyMatch.EditOutcome.NotFound ->
+                    return ToolExecutionResult("Error: old_string not found in $path", false, toolTitle = toolTitle)
+                is FuzzyMatch.EditOutcome.Ambiguous ->
+                    return ToolExecutionResult(
+                        "Error: old_string found ${edit.occurrences} times in $path. Use replace_all=true to " +
+                            "replace all occurrences, or provide a more specific old_string that matches exactly once.",
+                        false, toolTitle = toolTitle,
+                    )
+                is FuzzyMatch.EditOutcome.Applied -> {
+                    file.writeText(edit.content)
+                    val fuzzyNote = if (edit.fuzzy) {
+                        " (fuzzy match: whitespace/quote/dash differences were normalized — " +
+                            "the file's original characters outside the match were preserved)"
+                    } else {
+                        ""
+                    }
+                    return ToolExecutionResult(
+                        "Edited $path (${edit.replacements} replacement(s), ${edit.content.length} bytes)$fuzzyNote",
+                        true, toolTitle = toolTitle,
+                    )
+                }
             }
-
-            if (count == 0) {
-                return ToolExecutionResult("Error: old_string not found in $path", false, toolTitle = toolTitle)
-            }
-
-            if (count > 1 && !replaceAll) {
-                return ToolExecutionResult(
-                    "Error: old_string found $count times in $path. Use replace_all=true to replace all occurrences, " +
-                        "or provide a more specific old_string that matches exactly once.",
-                    false, toolTitle = toolTitle
-                )
-            }
-
-            val newContent = if (replaceAll) {
-                content.replace(oldString, newString)
-            } else {
-                content.replaceFirst(oldString, newString)
-            }
-
-            file.writeText(newContent)
-            val replacements = if (replaceAll) count else 1
-            ToolExecutionResult(
-                "Edited $path ($replacements replacement(s), ${newContent.length} bytes)",
-                true, toolTitle = toolTitle
-            )
         } catch (e: Exception) {
             ToolExecutionResult("Error editing file: ${e.message}", false)
         }
