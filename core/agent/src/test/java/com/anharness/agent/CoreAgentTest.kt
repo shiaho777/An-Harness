@@ -170,6 +170,97 @@ class AgentLoopTest {
         )
         assertTrue(session.messages.filterIsInstance<LlmMessage.ToolResult>().single().isError)
     }
+
+    @Test
+    fun schemaViolationFailsCallBeforeExecution() = runTest {
+        val def = LlmToolDefinition(
+            name = "file_read",
+            description = "read",
+            inputSchema = buildJsonObject {
+                put("type", "object")
+                put("properties", buildJsonObject {
+                    put("path", buildJsonObject { put("type", "string") })
+                })
+                put("required", kotlinx.serialization.json.JsonArray(
+                    listOf(kotlinx.serialization.json.JsonPrimitive("path"))))
+            },
+        )
+        val tool = FakeTool(def)
+        val session = AgentSession(systemPrompt = "sys", tools = listOf(tool))
+        var n = 0
+        val loop = AgentLoop { _, _, _ ->
+            flowOf(
+                LlmStreamEvent.Done(
+                    if (n++ == 0) {
+                        LlmMessage.Assistant(
+                            "read",
+                            listOf(com.anharness.llm.LlmToolCall("1", "file_read", JsonObject(emptyMap()))),
+                        )
+                    } else {
+                        LlmMessage.Assistant("done")
+                    },
+                ),
+            )
+        }
+        loop.run(
+            prompts = listOf(LlmMessage.User("hi")),
+            session = session,
+            config = AgentLoopConfig(model = fakeModel, apiKey = "k"),
+            emit = {},
+        )
+        assertTrue(tool.seen.isEmpty()) // never executed
+        val result = session.messages.filterIsInstance<LlmMessage.ToolResult>().single()
+        assertTrue(result.isError)
+        assertTrue(result.text.contains("missing required argument \"path\""))
+    }
+
+    @Test
+    fun transformContextCanRewriteMessagesAndSystemPrompt() = runTest {
+        val seenSystemPrompts = mutableListOf<String>()
+        val session = AgentSession(systemPrompt = "original sys")
+        val loop = AgentLoop { _, ctx, _ ->
+            seenSystemPrompts.add(ctx.systemPrompt)
+            flowOf(LlmStreamEvent.Done(LlmMessage.Assistant("ok")))
+        }
+        loop.run(
+            prompts = listOf(LlmMessage.User("hi")),
+            session = session,
+            config = AgentLoopConfig(
+                model = fakeModel,
+                apiKey = "k",
+                transformContext = { input ->
+                    ContextTransformResult(
+                        messages = input.messages + LlmMessage.User("[injected]"),
+                        systemPrompt = input.systemPrompt + " +extra",
+                    )
+                },
+            ),
+            emit = {},
+        )
+        assertEquals(listOf("original sys +extra"), seenSystemPrompts)
+    }
+
+    @Test
+    fun beforeRequestPatchesStreamOptions() = runTest {
+        val seenMaxTokens = mutableListOf<Int>()
+        val session = AgentSession(systemPrompt = "sys")
+        val loop = AgentLoop { _, _, opts ->
+            seenMaxTokens.add(opts.maxTokens)
+            flowOf(LlmStreamEvent.Done(LlmMessage.Assistant("ok")))
+        }
+        loop.run(
+            prompts = listOf(LlmMessage.User("hi")),
+            session = session,
+            config = AgentLoopConfig(
+                model = fakeModel,
+                apiKey = "k",
+                maxTokens = 4096,
+                beforeRequest = { it.copy(maxTokens = 512) },
+            ),
+            emit = {},
+        )
+        assertEquals(listOf(512), seenMaxTokens)
+    }
 }
 
 class AgentSessionStoreTest {

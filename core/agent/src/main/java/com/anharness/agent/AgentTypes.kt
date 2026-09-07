@@ -6,6 +6,7 @@ import com.anharness.llm.LlmToolDefinition
 import com.anharness.llm.LlmUsage
 import com.anharness.llm.ModelDescriptor
 import com.anharness.llm.StreamFn
+import com.anharness.llm.StreamOptions
 import com.anharness.llm.ThinkingLevel
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonObject
@@ -66,6 +67,18 @@ data class TurnContext(
     val newMessages: List<LlmMessage>,
 )
 
+/** Input to the per-request context transform (pi's transform_context hook). */
+data class ContextTransformInput(
+    val messages: List<LlmMessage>,
+    val systemPrompt: String,
+)
+
+/** Result of the transform; null fields mean "keep as-is". */
+data class ContextTransformResult(
+    val messages: List<LlmMessage>? = null,
+    val systemPrompt: String? = null,
+)
+
 /** Port of pi AgentLoopConfig. */
 data class AgentLoopConfig(
     val model: ModelDescriptor,
@@ -75,7 +88,13 @@ data class AgentLoopConfig(
     val maxTokens: Int = 4096,
     /** "sequential" forces one-at-a-time; default parallels unless a tool opts into sequential. */
     val toolExecution: String = "parallel",
-    val transformContext: (suspend (List<LlmMessage>) -> List<LlmMessage>)? = null,
+    /**
+     * Per-request context pipeline (pi transform_context): may rewrite the
+     * message list and/or the system prompt before every LLM call.
+     */
+    val transformContext: (suspend (ContextTransformInput) -> ContextTransformResult)? = null,
+    /** Per-request stream-options patch (pi before_request), e.g. token caps per step. */
+    val beforeRequest: (suspend (StreamOptions) -> StreamOptions)? = null,
     val beforeToolCall: (suspend (BeforeToolCallContext) -> BeforeToolCallResult?)? = null,
     val afterToolCall: (suspend (AfterToolCallContext) -> AfterToolCallResult?)? = null,
     val shouldStopAfterTurn: (suspend (TurnContext) -> Boolean)? = null,

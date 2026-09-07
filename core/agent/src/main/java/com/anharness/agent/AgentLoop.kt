@@ -1,5 +1,6 @@
 package com.anharness.agent
 
+import com.anharness.llm.LlmContext
 import com.anharness.llm.LlmMessage
 import com.anharness.llm.LlmStreamEvent
 import com.anharness.llm.StopReason
@@ -132,15 +133,27 @@ class AgentLoop(
         emit: AgentEventSink,
         isCancelled: () -> Boolean,
     ): LlmMessage.Assistant {
+        // Per-request context pipeline (pi transform_context): messages AND
+        // system prompt may be rewritten before every call.
         var messages = session.messages.toList()
-        config.transformContext?.let { messages = it(messages) }
-        val llmContext = session.toLlmContext(messages)
-        val options = StreamOptions(
+        var systemPrompt = session.systemPrompt
+        config.transformContext?.let { transform ->
+            val out = transform(ContextTransformInput(messages, systemPrompt))
+            out.messages?.let { messages = it }
+            out.systemPrompt?.let { systemPrompt = it }
+        }
+        val llmContext = LlmContext(
+            systemPrompt = systemPrompt,
+            messages = messages,
+            tools = session.tools.map { it.definition },
+        )
+        var options = StreamOptions(
             apiKey = config.apiKey,
             baseUrl = config.baseUrl,
             thinking = config.thinking,
             maxTokens = config.maxTokens,
         )
+        config.beforeRequest?.let { options = it(options) }
         emit(AgentEvent.MessageStart(LlmMessage.Assistant("")))
         val text = StringBuilder()
         val toolCalls = mutableListOf<com.anharness.llm.LlmToolCall>()
@@ -221,6 +234,14 @@ class AgentLoop(
             val tool = byName[call.name]
             if (tool == null) {
                 val r = errorResult("Tool ${call.name} not found")
+                emit(AgentEvent.ToolExecutionEnd(call.id, call.name, r))
+                return LlmMessage.ToolResult(call.id, call.name, r.text, true) to r
+            }
+            // Validate args against the tool schema before anything else (pi
+            // prepareToolCall): malformed calls become error results, not executions.
+            val validation = com.anharness.llm.validateToolArguments(tool.definition, call.arguments)
+            if (validation.isFailure) {
+                val r = errorResult("Invalid arguments for ${call.name}: ${validation.exceptionOrNull()?.message}")
                 emit(AgentEvent.ToolExecutionEnd(call.id, call.name, r))
                 return LlmMessage.ToolResult(call.id, call.name, r.text, true) to r
             }
