@@ -40,6 +40,11 @@ object AgentTools {
             add(memoryWriteDefinition())
             add(memoryGetDefinition())
         }
+        // [T-android-plan-mode] exit_plan_mode stays registered while plan
+        // mode is inactive (dsh parity): entering or leaving plan mode changes
+        // only the prompt section, never the request tool catalog — execution
+        // outside plan mode fails in the executor.
+        add(exitPlanModeDefinition())
     }
 
     // Aligned with iOS AIChatViewModel.swift:4982-4993
@@ -135,5 +140,21 @@ object AgentTools {
         ),
         required = listOf("tool_title"),
         propertyOrdering = listOf("tool_title", "scope", "keywords"),
+    )
+
+    // [T-android-plan-mode] Aligned with dsh plan-mode's exit tool: registered
+    // unconditionally; execution validates that plan mode is active and that a
+    // complete markdown plan (single # heading) is presented for user review.
+    private fun exitPlanModeDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "exit_plan_mode",
+        description = "Exit plan mode. Call ONLY when plan mode is active and you have finished analyzing the task. " +
+            "Present the complete implementation plan as markdown beginning with a single # heading; the user reviews " +
+            "it before work proceeds. Calls made while plan mode is off, or without a complete plan, fail.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Present plan for approval'). Use the same language as the user."),
+            "plan" to AgentToolParam("string", "The complete implementation plan in markdown, beginning with a single # heading."),
+        ),
+        required = listOf("tool_title", "plan"),
+        propertyOrdering = listOf("tool_title", "plan"),
     )
 }
