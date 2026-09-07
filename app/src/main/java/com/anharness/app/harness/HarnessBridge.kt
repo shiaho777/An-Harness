@@ -9,6 +9,7 @@ import com.anharness.agent.AfterToolCallContext
 import com.anharness.agent.AfterToolCallResult
 import com.anharness.agent.BeforeToolCallContext
 import com.anharness.agent.BeforeToolCallResult
+import com.anharness.agent.ContextTransformResult
 import com.anharness.agent.SlidingWindowCompaction
 import com.anharness.app.agent.Level
 import com.anharness.app.agent.ToolLoopDetector
@@ -245,9 +246,13 @@ object HarnessBridge {
         thinking = thinking,
         beforeToolCall = { guard.before(it) },
         afterToolCall = { guard.after(it) },
-        transformContext = { messages ->
+        transformContext = { input ->
             // Compaction only kicks in past the window; cheap path is a passthrough.
-            if (messages.size > 80) compaction.compact(messages) else messages
+            if (input.messages.size > 80) {
+                ContextTransformResult(messages = compaction.compact(input.messages))
+            } else {
+                ContextTransformResult()
+            }
         },
         getSteeringMessages = getSteering,
         getFollowUpMessages = getFollowUp,

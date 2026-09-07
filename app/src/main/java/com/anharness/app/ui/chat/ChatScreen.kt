@@ -4391,7 +4391,30 @@ fun ChatScreen(
                     }.collect { lastToolBlocks = it }
                 }
                 val allToolBlocks = lastToolBlocks
-                if (lastToolBlocks.isNotEmpty()) {
+                // Auto-hide: the bar exists to show in-flight tool work, so it
+                // stays mounted only while any block is active. Once every
+                // block settles, keep it briefly so the final state is
+                // readable, then unmount — previously it stayed pinned above
+                // the composer forever (the "stuck card" report). Details
+                // remain reachable via the in-message tool pills, which share
+                // the same ToolDetailSheet.
+                var floatingBarVisible by remember { mutableStateOf(false) }
+                LaunchedEffect(lastToolBlocks) {
+                    val anyActive = lastToolBlocks.any {
+                        it.toolStatus == ToolBlockStatus.RUNNING ||
+                            it.toolStatus == ToolBlockStatus.STREAMING ||
+                            it.toolStatus == ToolBlockStatus.PENDING
+                    }
+                    when {
+                        anyActive -> floatingBarVisible = true
+                        lastToolBlocks.isEmpty() -> floatingBarVisible = false
+                        else -> {
+                            kotlinx.coroutines.delay(2_500)
+                            floatingBarVisible = false
+                        }
+                    }
+                }
+                if (floatingBarVisible && lastToolBlocks.isNotEmpty()) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)

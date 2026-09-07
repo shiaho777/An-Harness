@@ -20,8 +20,12 @@
 * `AgentLoop` contract: every-result-`terminate`
   required to stop a batch; `length` stop fails the whole tool batch;
   unknown tools become error results, never throws.
+* Arguments are schema-validated (`validateToolArguments`) before
+  `beforeToolCall`; violations become error results, never executions.
 * `ToolLoopDetector` thresholds stay `warning < critical < circuitBreaker`;
   `record()` never returns CRITICAL (check-only by spec).
+* `LlmSummarizingCompaction` never degrades silently: threshold miss or
+  summarization failure returns the context unchanged.
 * New agent behavior needs a unit test in `core/*/src/test` (faux
   StreamFn + fake tools, no network/keys). Run
   `./gradlew :core:llm:testDebugUnitTest :core:agent:testDebugUnitTest`.
