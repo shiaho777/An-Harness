@@ -28,6 +28,13 @@ data class ChatSessionEntity(
     // iOS parity fields:
     @ColumnInfo(name = "source") val source: String? = null,             // e.g. "shortcut", "share"
     @ColumnInfo(name = "memory_enabled") val memoryEnabled: Int = 1,     // 1=on, 0=off
+    /**
+     * Per-session plan mode (dsh plan-mode parity). 1=on, 0=off. While on,
+     * the `plan:policy` prompt section is injected and `exit_plan_mode`
+     * becomes callable. Soft guidance only — sandbox and approval policy
+     * enforce restrictions independently.
+     */
+    @ColumnInfo(name = "plan_mode") val planMode: Int = 0,
     @ColumnInfo(name = "pinned_at") val pinnedAt: Long? = null,          // milliseconds, null=not pinned
     @ColumnInfo(name = "edit_count") val editCount: Int = 0,             // message edit counter
     // T239: per-session thinking-mode override. null = unset (use the

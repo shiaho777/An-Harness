@@ -281,6 +281,10 @@ interface ChatDao {
     @Query("UPDATE sessions SET memory_enabled = :enabled, updated_at = :updatedAt WHERE id = :id")
     suspend fun updateMemoryEnabled(id: String, enabled: Int, updatedAt: Long = System.currentTimeMillis())
 
+    // Session: plan_mode (dsh plan-mode parity) — 1=on, 0=off.
+    @Query("UPDATE sessions SET plan_mode = :enabled, updated_at = :updatedAt WHERE id = :id")
+    suspend fun updatePlanMode(id: String, enabled: Int, updatedAt: Long = System.currentTimeMillis())
+
     // Session: thinking_override (T239) — null clears the explicit choice and
     // falls back to the current model/group default; non-null is a
     // ThinkingLevel.name string ("OFF"/"LOW"/"MEDIUM"/"HIGH"/"XHIGH").

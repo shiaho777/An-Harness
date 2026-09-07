@@ -113,6 +113,12 @@ internal fun ChatViewModel.filteredSlashCommands(): List<SlashCommand> {
                     else R.string.slash_memory_writes_off,
                 ),
             )
+            "plan" -> cmd.copy(
+                subtitle = context.getString(
+                    if (_planMode.value) R.string.slash_plan_on
+                    else R.string.slash_plan_off,
+                ),
+            )
             "thinking" -> cmd.copy(
                 subtitle = if (!currentModelSupportsReasoning) {
                     context.getString(R.string.slash_thinking_unsupported)

@@ -15,6 +15,7 @@ import com.anharness.app.browser.BrowserActionInput
 import com.anharness.app.browser.BrowserTabPool
 import com.anharness.app.data.db.MessageEntity
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Assignment
 import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lightbulb
@@ -1385,6 +1386,17 @@ class ChatViewModel(
         MutableStateFlow(com.anharness.app.data.MemoryGlobalPrefs.isGlobalEnabled(context))
     val memoryEnabled: StateFlow<Boolean> = _memoryEnabled.asStateFlow()
 
+    /**
+     * [T-android-plan-mode] Per-session plan mode (dsh plan-mode parity).
+     * Always starts OFF for a fresh draft — unlike memory there is no global
+     * default; loadSession() overwrites with the persisted value. While ON,
+     * buildSystemPrompt injects the `plan:policy` section and exit_plan_mode
+     * becomes callable. Soft guidance only: no tool is physically disabled —
+     * sandbox and approval policy enforce restrictions independently.
+     */
+    internal val _planMode = MutableStateFlow(false)
+    val planMode: StateFlow<Boolean> = _planMode.asStateFlow()
+
     internal val _thinkingLevel = MutableStateFlow(ThinkingLevel.OFF)
     val thinkingLevel: StateFlow<ThinkingLevel> = _thinkingLevel.asStateFlow()
 
@@ -1797,6 +1809,12 @@ class ChatViewModel(
             subtitle = "",
         ),
         SlashCommand(
+            id = "plan",
+            icon = Icons.Default.Assignment,
+            title = "Plan",
+            subtitle = "",
+        ),
+        SlashCommand(
             id = "thinking",
             icon = Icons.Default.Lightbulb,
             title = "Thinking",
@@ -1867,6 +1885,7 @@ class ChatViewModel(
         when (cmd.id) {
             "compact" -> compactAll()
             "memory" -> toggleMemoryEnabled()
+            "plan" -> togglePlanMode()
             "thinking" -> toggleThinking()
             "harness" -> toggleAgentLoop()
             "clear" -> _clearChatConfirmRequested.value = true
@@ -1897,6 +1916,31 @@ class ChatViewModel(
         appendSystemInfo(
             text = "Memory writes ${if (newValue) "enabled" else "disabled"}. Reads are unaffected.",
             iconKind = "memory",
+        )
+    }
+
+    /**
+     * [T-android-plan-mode] Toggle plan mode, persist to DB, and append a
+     * system-info message. Mirrors toggleMemoryEnabled's draft-materialize
+     * pattern so the flag lands on the persisted session id. While ON, the
+     * plan:policy prompt section is injected and exit_plan_mode is callable;
+     * tools themselves are never physically gated (soft guidance, per dsh).
+     */
+    private fun togglePlanMode() {
+        val newValue = !_planMode.value
+        _planMode.value = newValue
+        viewModelScope.launch {
+            val sid = ensureSession()
+            chatRepository.dao.updatePlanMode(sid, if (newValue) 1 else 0)
+        }
+        appendSystemInfo(
+            text = if (newValue) {
+                "Plan mode enabled. The agent will analyze and propose a written plan " +
+                    "before acting; it exits plan mode via exit_plan_mode."
+            } else {
+                "Plan mode disabled. The agent may act on approved plans directly."
+            },
+            iconKind = "plan",
         )
     }
 
@@ -4038,6 +4082,7 @@ class ChatViewModel(
             _sessionTitle.value = session.title ?: "New Chat"
             _sessionCategory.value = session.category
             _memoryEnabled.value = session.memoryEnabled != 0
+            _planMode.value = session.planMode != 0
             // T239: hydrate persisted thinking-mode override. null = unset
             // (use OFF as the legacy default); non-null = explicit user
             // choice persisted across cold-start. runCatching guards against
@@ -9230,6 +9275,7 @@ class ChatViewModel(
             "browser_use" -> executeBrowserUseTool(argsJson)
             "memory_write" -> executeMemoryWriteTool(argsJson)
             "memory_get" -> executeMemoryGetTool(argsJson)
+            "exit_plan_mode" -> executeExitPlanMode(argsJson)
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
     }
@@ -9705,6 +9751,61 @@ class ChatViewModel(
             keywords = keywords,
         )
         return ToolExecutionResult(result.output, result.success, toolTitle = result.toolTitle)
+    }
+
+    /**
+     * [T-android-plan-mode] dsh plan-mode exit tool. Registered
+     * unconditionally (tool catalog never changes), but execution is only
+     * meaningful while plan mode is active: the call fails otherwise. A valid
+     * call carries a complete markdown plan beginning with a single '#'
+     * heading; the plan is surfaced to the user as the tool result, plan mode
+     * turns off (persisted), and the agent proceeds with implementation. An
+     * incomplete plan is a failed call carrying feedback — the model revises
+     * and presents again, never silently exiting (dsh semantics).
+     */
+    private fun executeExitPlanMode(argsJson: String): ToolExecutionResult {
+        val title = try {
+            JSONObject(argsJson).optString("tool_title", "Exit plan mode")
+        } catch (_: Exception) { "Exit plan mode" }
+        if (!_planMode.value) {
+            return ToolExecutionResult(
+                "exit_plan_mode failed: plan mode is not active in this session. " +
+                    "Do not call this tool unless the user has enabled plan mode.",
+                false, toolTitle = title,
+            )
+        }
+        val plan = try {
+            JSONObject(argsJson).optString("plan", "").trim()
+        } catch (_: Exception) { "" }
+        val headingOk = plan.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .firstOrNull()
+            ?.let { it.startsWith("# ") && !it.startsWith("##") } == true
+        if (!headingOk || plan.length < 120) {
+            return ToolExecutionResult(
+                "exit_plan_mode failed: present a COMPLETE implementation plan in " +
+                    "markdown, beginning with a single # heading (not ##), covering " +
+                    "steps, files to touch, and verification. Revise and call again.",
+                false, toolTitle = title,
+            )
+        }
+        // Approved: exit plan mode, persist, narrate. dsh appends the pending
+        // exit at the next in-turn pre-step; our agent loop rebuilds the prompt
+        // every request, so flipping the flag mid-turn is equivalent.
+        _planMode.value = false
+        viewModelScope.launch {
+            chatRepository.dao.updatePlanMode(activeSessionId, 0)
+        }
+        appendSystemInfo(
+            text = "Plan approved — exited plan mode. Implementation may proceed.",
+            iconKind = "plan",
+        )
+        return ToolExecutionResult(
+            "Plan approved. Plan mode is now OFF for this session. Proceed with " +
+                "implementation. The approved plan:\n\n$plan",
+            true, toolTitle = title,
+        )
     }
 
     // ─── UI Helpers ──────────────────────────────────────────────────────
@@ -10301,32 +10402,57 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                 "dailyChars=${dailyMemoryFragment?.length ?: 0}",
         )
 
-        return buildString {
-            append(base)
-            if (skillFragment != null) {
-                append("\n\n")
-                append(skillFragment)
-            }
-            if (mcpFragment != null) {
-                append("\n\n")
-                append(mcpFragment)
-            }
-            if (globalMemoryFragment != null) {
-                append("\n\n")
-                append(globalMemoryFragment)
-            }
-            if (dailyMemoryFragment != null) {
-                append("\n\n")
-                append(dailyMemoryFragment)
-            }
-            // Runtime context goes last so the prefix above stays byte-stable
-            // across requests within the same day. Keep ordering deterministic
-            // (date → tz → lang → model count) — any reorder defeats the cache.
-            append("\n\nRuntime context:\n")
+        // [T-android-prompt-sections] Assemble via core:agent's named/ordered
+        // PromptSections (dsh ctx.systemPrompt discipline, not Cordis). The
+        // legacy manual join and the assembler produce byte-identical output:
+        // enabled sections join with "\n\n", absent fragments contribute
+        // nothing. plan:policy is the first conditional section — future
+        // modes/presets become data here, not branches in the monolith.
+        val planPolicySection = """
+Plan mode is ACTIVE. You are in read-only planning mode:
+- Analyze, research, and design the solution — but do NOT make any changes yet.
+- You may read files, run read-only shell commands (ls, cat, grep, find, git status/log/diff), and search the web.
+- Do NOT write, edit, or delete files; do NOT install packages or otherwise modify system state.
+- When the analysis is complete, present a full implementation plan via exit_plan_mode (markdown beginning with a single # heading: goal, steps, files to touch, verification).
+- The user reviews the plan; only after their approval may you proceed with implementation.
+        """.trim()
+        val runtimeBlock = buildString {
+            append("Runtime context:\n")
             append("- Current date: ").append(dateStr).append(" (").append(tzId).append(")\n")
             append("- Device language: ").append(lang).append("\n")
             append("- minis-model-use models available: ").append(modelUseCount)
         }
+        return com.anharness.agent.SystemPromptAssembler.assemble(
+            listOf(
+                com.anharness.agent.PromptSection("base", order = 10, text = base),
+                com.anharness.agent.PromptSection(
+                    "plan:policy", order = 20,
+                    enabled = _planMode.value,
+                    text = planPolicySection,
+                ),
+                com.anharness.agent.PromptSection(
+                    "skills", order = 30,
+                    enabled = skillFragment != null,
+                    text = skillFragment.orEmpty(),
+                ),
+                com.anharness.agent.PromptSection(
+                    "mcp", order = 40,
+                    enabled = mcpFragment != null,
+                    text = mcpFragment.orEmpty(),
+                ),
+                com.anharness.agent.PromptSection(
+                    "memory:global", order = 50,
+                    enabled = globalMemoryFragment != null,
+                    text = globalMemoryFragment.orEmpty(),
+                ),
+                com.anharness.agent.PromptSection(
+                    "memory:daily", order = 60,
+                    enabled = dailyMemoryFragment != null,
+                    text = dailyMemoryFragment.orEmpty(),
+                ),
+                com.anharness.agent.PromptSection("runtime", order = 90, text = runtimeBlock),
+            ),
+        )
     }
 
     // ─── Legacy tool execution methods (kept for compatibility) ───────────
