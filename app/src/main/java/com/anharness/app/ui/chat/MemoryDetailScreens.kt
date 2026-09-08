@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.anharness.app.R
 import com.anharness.app.data.repository.MemoryRepository
+import com.anharness.app.tools.MemoryToolRecord
 import com.anharness.app.ui.theme.ChatColors
 import com.anharness.app.ui.components.MinisTextButton
 import com.anharness.app.i18n.uppercaseForDisplay

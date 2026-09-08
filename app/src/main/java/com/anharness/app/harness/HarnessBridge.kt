@@ -74,11 +74,19 @@ object HarnessBridge {
 
     // ── AgentTool adapters ─────────────────────────────────────────
 
-    private abstract class BaseTool(
-        appDefinition: AgentToolDefinition,
-        executionMode: String = "parallel",
-    ) : AgentTool {
-        override val definition: LlmToolDefinition = appDefinition.toLlmTool(executionMode)
+    /**
+     * Shared base for AgentTool adapters in this package: holds the converted
+     * [LlmToolDefinition] and the org.json args conversion (kotlinx
+     * JsonObject → JSON string) so executors keep parsing args exactly the
+     * way the legacy ChatViewModel path did. P2 (issue #16): also subclassed
+     * by the concrete executor wrappers in ExecutorTools.kt.
+     */
+    abstract class BaseTool : AgentTool {
+        protected abstract val appDefinition: AgentToolDefinition
+        protected open val executionMode: String = "parallel"
+
+        final override val definition: LlmToolDefinition
+            get() = appDefinition.toLlmTool(executionMode)
 
         protected fun argsJson(call: AgentToolCall): String =
             org.json.JSONObject(call.arguments.toMap()).toString()
@@ -93,12 +101,22 @@ object HarnessBridge {
         }
     }
 
+    /** Public definition lookup for ExecutorTools subclasses (source of truth: AgentTools). */
+    fun toolDefinition(name: String): AgentToolDefinition = when (name) {
+        "shell_execute" -> AgentTools.shellExecuteDefinition()
+        "browser_use" -> AgentTools.browserUseDefinition()
+        "memory_write" -> AgentTools.memoryWriteDefinition()
+        "memory_get" -> AgentTools.memoryGetDefinition()
+        else -> throw IllegalArgumentException("Unknown tool: $name")
+    }
+
     /** File tools are standalone — no ViewModel needed. */
     fun fileTools(
         context: Context,
         sessionId: () -> String,
     ): List<AgentTool> = listOf(
-        object : BaseTool(FileReadTool.definition()) {
+        object : BaseTool() {
+            override val appDefinition = FileReadTool.definition()
             override suspend fun execute(
                 call: AgentToolCall,
                 signal: () -> Boolean,
@@ -106,7 +124,8 @@ object HarnessBridge {
             ): AgentToolResult =
                 FileReadTool.execute(argsJson(call), sessionId(), context).toAgentResult()
         },
-        object : BaseTool(FileWriteTool.definition()) {
+        object : BaseTool() {
+            override val appDefinition = FileWriteTool.definition()
             override suspend fun execute(
                 call: AgentToolCall,
                 signal: () -> Boolean,
@@ -114,7 +133,8 @@ object HarnessBridge {
             ): AgentToolResult =
                 FileWriteTool.execute(argsJson(call), sessionId(), context).toAgentResult()
         },
-        object : BaseTool(FileEditTool.definition()) {
+        object : BaseTool() {
+            override val appDefinition = FileEditTool.definition()
             override suspend fun execute(
                 call: AgentToolCall,
                 signal: () -> Boolean,
@@ -126,15 +146,17 @@ object HarnessBridge {
 
     /**
      * Generic adapter for tools whose executor still lives in ChatViewModel
-     * (shell_execute, browser_use, memory_*, read_image).
-     * The ViewModel passes `::executeTool`-equivalent lambdas; P2 migrates
-     * the bodies here and drops the lambda.
+     * (read_image until it migrates). The ViewModel passes a
+     * `::executeTool`-equivalent lambda; P2 (#16) migrated shell/browser/
+     * memory bodies into ExecutorTools.kt.
      */
     fun delegatingTool(
         definition: AgentToolDefinition,
         executionMode: String = "parallel",
         executor: suspend (argsJson: String) -> ToolExecutionResult,
-    ): AgentTool = object : BaseTool(definition, executionMode) {
+    ): AgentTool = object : BaseTool() {
+        override val appDefinition = definition
+        override val executionMode = executionMode
         override suspend fun execute(
             call: AgentToolCall,
             signal: () -> Boolean,
@@ -145,6 +167,94 @@ object HarnessBridge {
     fun ToolExecutionResult.toAgentResult(): AgentToolResult = AgentToolResult(
         text = output,
         isError = !success,
+    )
+
+    // ── concrete executor wrappers (P2, issue #16) ────────────────
+    // shell/browser/memory bodies now live in ExecutorTools.kt (harness
+    // layer); these AgentTool classes are the core:agent-facing wrappers.
+    // ChatViewModel keeps ownership of shared state (browser tab pool,
+    // memory repository, session id) and passes it in per call — no globals.
+
+    /** shell_execute as an AgentTool. */
+    fun shellTool(
+        context: android.content.Context,
+        sessionId: () -> String,
+        onLine: ((line: String) -> Unit)? = null,
+    ): AgentTool = object : BaseTool() {
+        override val appDefinition = toolDefinition("shell_execute")
+        override val executionMode = "sequential"
+        override suspend fun execute(
+            call: AgentToolCall,
+            signal: () -> Boolean,
+            onUpdate: (String) -> Unit,
+        ): AgentToolResult =
+            ExecutorTools.executeShell(context, sessionId, argsJson(call), onLine, onUpdate).agentResult
+    }
+
+    /** browser_use as an AgentTool. */
+    fun browserTool(
+        tabPool: com.anharness.app.browser.BrowserTabPool,
+        sessionId: () -> String,
+        filesDir: java.io.File,
+    ): AgentTool = object : BaseTool() {
+        override val appDefinition = toolDefinition("browser_use")
+        override val executionMode = "sequential"
+        override suspend fun execute(
+            call: AgentToolCall,
+            signal: () -> Boolean,
+            onUpdate: (String) -> Unit,
+        ): AgentToolResult =
+            ExecutorTools.executeBrowser(tabPool, sessionId, filesDir, argsJson(call)).agentResult
+    }
+
+    /** memory_write as an AgentTool. */
+    fun memoryWriteTool(
+        repository: com.anharness.app.data.repository.MemoryRepository?,
+        memoryEnabled: () -> Boolean,
+        onRecord: (com.anharness.app.tools.MemoryToolRecord) -> Unit = {},
+    ): AgentTool = object : BaseTool() {
+        override val appDefinition = toolDefinition("memory_write")
+        override suspend fun execute(
+            call: AgentToolCall,
+            signal: () -> Boolean,
+            onUpdate: (String) -> Unit,
+        ): AgentToolResult =
+            ExecutorTools.executeMemoryWrite(repository, memoryEnabled, argsJson(call), onRecord).agentResult
+    }
+
+    /** memory_get as an AgentTool. */
+    fun memoryGetTool(
+        repository: com.anharness.app.data.repository.MemoryRepository?,
+        onRecord: (com.anharness.app.tools.MemoryToolRecord) -> Unit = {},
+    ): AgentTool = object : BaseTool() {
+        override val appDefinition = toolDefinition("memory_get")
+        override suspend fun execute(
+            call: AgentToolCall,
+            signal: () -> Boolean,
+            onUpdate: (String) -> Unit,
+        ): AgentToolResult =
+            ExecutorTools.executeMemoryGet(repository, argsJson(call), onRecord).agentResult
+    }
+
+    /**
+     * All delegatable executors as AgentTools: shell, browser, memory (+ file
+     * tools). Used by the AgentLoop path; read_image / exit_plan_mode stay
+     * ViewModel-delegated (they depend on ViewModel state the harness layer
+     * can't see — vision-group config, plan-mode flow).
+     */
+    fun executorTools(
+        context: android.content.Context,
+        sessionId: () -> String,
+        tabPool: com.anharness.app.browser.BrowserTabPool,
+        memoryRepository: com.anharness.app.data.repository.MemoryRepository?,
+        memoryEnabled: () -> Boolean,
+        onMemoryRecord: (com.anharness.app.tools.MemoryToolRecord) -> Unit = {},
+        onShellLine: ((line: String) -> Unit)? = null,
+    ): List<AgentTool> = fileTools(context, sessionId) + listOf(
+        shellTool(context, sessionId, onShellLine),
+        browserTool(tabPool, sessionId, context.filesDir),
+        memoryWriteTool(memoryRepository, memoryEnabled, onMemoryRecord),
+        memoryGetTool(memoryRepository, onMemoryRecord),
     )
 
     /**
@@ -167,6 +277,49 @@ object HarnessBridge {
             org.json.JSONObject(argsJson).optString("tool_title", FileReadTool.NAME)
         }.getOrDefault(FileReadTool.NAME)
         return ToolExecutionResult(output = out.text, success = !out.isError, toolTitle = title)
+    }
+
+    /**
+     * P2 pilot entry points (issue #16): run one shell/browser/memory call
+     * through the harness-layer executor. Same executor bodies as the legacy
+     * ChatViewModel path — only the code location changed. Throws on
+     * malformed args; the caller owns fallback policy (legacy executor).
+     *
+     * [dependencies] carries the ViewModel-owned shared state the executors
+     * need; it is read per call, not captured at construction, so a session
+     * switch mid-flight is honoured.
+     */
+    interface ExecutorDependencies {
+        val memoryRepository: com.anharness.app.data.repository.MemoryRepository?
+        val memoryEnabled: Boolean
+        /** Browser tab pool — lazily resolved so first access creates it on the pool's own terms. */
+        val browserTabPool: com.anharness.app.browser.BrowserTabPool
+    }
+
+    suspend fun executePilotTool(
+        name: String,
+        toolCallId: String,
+        argsJson: String,
+        // Nullable: the memory branches never dereference it (JVM tests pass
+        // null); shell/browser require a real Context and run on device.
+        context: Context?,
+        sessionId: () -> String,
+        deps: ExecutorDependencies,
+        onShellLine: ((line: String) -> Unit)? = null,
+        onMemoryRecord: (com.anharness.app.tools.MemoryToolRecord) -> Unit = {},
+    ): ToolExecutionResult {
+        val outcome = when (name) {
+            "shell_execute" ->
+                ExecutorTools.executeShell(requireNotNull(context) { "shell_execute needs a Context" }, sessionId, argsJson, onShellLine)
+            "browser_use" ->
+                ExecutorTools.executeBrowser(deps.browserTabPool, sessionId, requireNotNull(context) { "browser_use needs a Context" }.filesDir, argsJson)
+            "memory_write" ->
+                ExecutorTools.executeMemoryWrite(deps.memoryRepository, { deps.memoryEnabled }, argsJson, onMemoryRecord)
+            "memory_get" ->
+                ExecutorTools.executeMemoryGet(deps.memoryRepository, argsJson, onMemoryRecord)
+            else -> throw IllegalArgumentException("executePilotTool: unsupported tool $name")
+        }
+        return outcome.result
     }
 
     // ── loop-guard hooks (ToolLoopDetector as pi hooks) ────────────
