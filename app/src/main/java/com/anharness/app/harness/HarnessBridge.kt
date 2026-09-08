@@ -9,6 +9,7 @@ import com.anharness.agent.AfterToolCallContext
 import com.anharness.agent.AfterToolCallResult
 import com.anharness.agent.BeforeToolCallContext
 import com.anharness.agent.BeforeToolCallResult
+import com.anharness.agent.CompactionStrategy
 import com.anharness.agent.ContextTransformResult
 import com.anharness.agent.SlidingWindowCompaction
 import com.anharness.app.agent.Level
@@ -236,7 +237,9 @@ object HarnessBridge {
         baseUrl: String? = null,
         thinking: ThinkingLevel? = null,
         guard: LoopGuard = LoopGuard(),
-        compaction: SlidingWindowCompaction = SlidingWindowCompaction(),
+        // Any CompactionStrategy: SlidingWindowCompaction (zero-LLM) or
+        // LlmSummarizingCompaction (full pi pipeline). Defaults to sliding.
+        compaction: CompactionStrategy = SlidingWindowCompaction(),
         getSteering: (suspend () -> List<com.anharness.llm.LlmMessage>)? = null,
         getFollowUp: (suspend () -> List<com.anharness.llm.LlmMessage>)? = null,
     ): AgentLoopConfig = AgentLoopConfig(

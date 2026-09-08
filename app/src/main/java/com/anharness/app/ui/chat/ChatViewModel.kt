@@ -2061,25 +2061,130 @@ class ChatViewModel(
     }
 
     /**
-     * If `text` is a slash command literal (e.g. "/compact"), run it and
-     * return true so the caller can skip the normal send path. Mirrors iOS
-     * `tryExecuteInputAsSlashCommand()`. Recognized titles are matched
-     * case-insensitively against [availableSlashCommands].
+     * If `text` is a slash command literal (e.g. "/compact", "/plan off",
+     * "/plan refactor authentication"), run it and return true so the caller
+     * can skip the normal send path. Mirrors iOS `tryExecuteInputAsSlashCommand()`
+     * and dsh plan-mode argument handling.
      *
-     * Accepts both ASCII `/` and the full-width `／` (U+FF0F): some Chinese/
-     * Japanese IMEs auto-substitute the full-width form when the user types
-     * `/` while a CJK keyboard layout is active. We treat them identically.
+     * Supports:
+     * - `/plan` → toggle plan mode
+     * - `/plan off` → explicitly disable plan mode
+     * - `/plan <text>` → enable plan mode and send <text> under plan guidance
+     * - `/mode` → cycle mode
+     * - `/mode <name>` → set mode by name (standard/code/research/chat)
+     *
+     * Accepts both ASCII `/` and the full-width `／` (U+FF0F).
      */
     fun tryExecuteInputAsSlashCommand(text: String): Boolean {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return false
         val first = trimmed[0]
         if (first != '/' && first != '／') return false
-        val name = trimmed.drop(1).lowercase()
-        val cmd = availableSlashCommands.firstOrNull { it.title.lowercase() == name }
+        val withoutSlash = trimmed.drop(1).trimStart()
+        if (withoutSlash.isEmpty()) return false
+
+        // Split "cmd" and optional "args": "/plan off" → ("plan", "off")
+        val spaceIdx = withoutSlash.indexOfAny(charArrayOf(' ', '\t', '\n'))
+        val (cmdName, args) = if (spaceIdx < 0) {
+            withoutSlash.lowercase() to ""
+        } else {
+            withoutSlash.substring(0, spaceIdx).lowercase() to withoutSlash.substring(spaceIdx + 1).trim()
+        }
+
+        val cmd = availableSlashCommands.firstOrNull { it.title.lowercase() == cmdName }
             ?: return false
-        executeSlashCommand(cmd)
+
+        when (cmd.id) {
+            "plan" -> executePlanWithArgs(args)
+            "mode" -> executeModeWithArgs(args)
+            else -> executeSlashCommand(cmd)
+        }
         return true
+    }
+
+    /**
+     * [T-android-plan-mode] dsh plan-mode command parity:
+     * - bare `/plan` → toggle
+     * - `/plan off` → explicitly disable
+     * - `/plan <text>` → enable plan mode and submit `<text>` in the same turn
+     */
+    private fun executePlanWithArgs(args: String) {
+        when {
+            args.isEmpty() -> togglePlanMode()
+            args.equals("off", ignoreCase = true) -> {
+                if (_planMode.value) {
+                    _planMode.value = false
+                    viewModelScope.launch {
+                        val sid = ensureSession()
+                        chatRepository.dao.updatePlanMode(sid, 0)
+                    }
+                    appendSystemInfo(
+                        text = "Plan mode disabled. The agent may act on approved plans directly.",
+                        iconKind = "plan",
+                    )
+                }
+            }
+            args.equals("on", ignoreCase = true) -> {
+                if (!_planMode.value) {
+                    _planMode.value = true
+                    viewModelScope.launch {
+                        val sid = ensureSession()
+                        chatRepository.dao.updatePlanMode(sid, 1)
+                    }
+                    appendSystemInfo(
+                        text = "Plan mode enabled. The agent will analyze and propose a written plan " +
+                            "before acting; it exits plan mode via exit_plan_mode.",
+                        iconKind = "plan",
+                    )
+                }
+            }
+            else -> {
+                // `/plan <text>`: ensure plan mode is on, then send the text
+                if (!_planMode.value) {
+                    _planMode.value = true
+                    viewModelScope.launch {
+                        val sid = ensureSession()
+                        chatRepository.dao.updatePlanMode(sid, 1)
+                    }
+                    appendSystemInfo(
+                        text = "Plan mode enabled for task: \"$args\"",
+                        iconKind = "plan",
+                    )
+                }
+                sendMessage(args)
+            }
+        }
+    }
+
+    /**
+     * [T-android-agent-modes] Set or cycle mode:
+     * - bare `/mode` → cycle
+     * - `/mode <name>` → switch directly to named mode (locked once session has content)
+     */
+    private fun executeModeWithArgs(args: String) {
+        if (args.isEmpty()) {
+            cycleAgentMode()
+            return
+        }
+        val target = com.anharness.app.agent.AgentMode.fromId(args)
+        val hasContent = _messages.value.any { it.role != "system" }
+        if (hasContent) {
+            appendSystemInfo(
+                text = "Agent mode is locked for this session (${_agentMode.value.displayName}). " +
+                    "Start a new session to pick a different mode.",
+                iconKind = "plan",
+            )
+            return
+        }
+        _agentMode.value = target
+        viewModelScope.launch {
+            val sid = ensureSession()
+            chatRepository.dao.updateAgentMode(sid, target.id)
+        }
+        appendSystemInfo(
+            text = "Agent mode: ${target.displayName} — ${target.description}",
+            iconKind = "plan",
+        )
     }
 
     /**
