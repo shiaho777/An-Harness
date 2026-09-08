@@ -35,6 +35,12 @@ data class ChatSessionEntity(
      * enforce restrictions independently.
      */
     @ColumnInfo(name = "plan_mode") val planMode: Int = 0,
+    /**
+     * [T-android-agent-modes] Per-session agent composition (dsh
+     * agent-presets parity). One of AgentMode.id ("standard"/"code"/
+     * "research"/"chat"); locked once the session has produced content.
+     */
+    @ColumnInfo(name = "agent_mode") val agentMode: String = "standard",
     @ColumnInfo(name = "pinned_at") val pinnedAt: Long? = null,          // milliseconds, null=not pinned
     @ColumnInfo(name = "edit_count") val editCount: Int = 0,             // message edit counter
     // T239: per-session thinking-mode override. null = unset (use the

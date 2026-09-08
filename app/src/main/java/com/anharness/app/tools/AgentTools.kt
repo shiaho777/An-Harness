@@ -27,6 +27,10 @@ object AgentTools {
         // attempt those calls. Mirrors the iOS gate at
         // AIChatViewModel.makeAgentTools(memoryEnabled:).
         memoryEnabled: Boolean = true,
+        // [T-android-agent-modes] Per-session composition: when non-null, only
+        // tools whose name is in this set are exposed. null = everything the
+        // other toggles produce (STANDARD mode, byte-identical to legacy).
+        enabledTools: Set<String>? = null,
     ): List<AgentToolDefinition> = buildList {
         add(shellExecuteDefinition())
         add(FileReadTool.definition())
@@ -45,6 +49,8 @@ object AgentTools {
         // only the prompt section, never the request tool catalog — execution
         // outside plan mode fails in the executor.
         add(exitPlanModeDefinition())
+    }.let { tools ->
+        if (enabledTools == null) tools else tools.filter { it.name in enabledTools }
     }
 
     // Aligned with iOS AIChatViewModel.swift:4982-4993

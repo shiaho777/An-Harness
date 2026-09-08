@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Extension
 import com.anharness.app.data.BPETokenizer
@@ -1228,6 +1229,11 @@ class ChatViewModel(
                 providerRepository, context,
             ),
             memoryEnabled = _memoryEnabled.value,
+            // [T-android-agent-modes] Per-session tool subset. STANDARD passes
+            // null → legacy byte-identical catalog.
+            enabledTools = _agentMode.value.let {
+                if (it == com.anharness.app.agent.AgentMode.STANDARD) null else it.enabledTools
+            },
         )
 
     /**
@@ -1396,6 +1402,15 @@ class ChatViewModel(
      */
     internal val _planMode = MutableStateFlow(false)
     val planMode: StateFlow<Boolean> = _planMode.asStateFlow()
+
+    /**
+     * [T-android-agent-modes] Per-session agent composition. Drafts start at
+     * STANDARD; loadSession() overwrites with the persisted value. Locked
+     * once the session has produced content — swapping tools mid-conversation
+     * would orphan recorded tool calls (dsh agent-presets constraint).
+     */
+    internal val _agentMode = MutableStateFlow(com.anharness.app.agent.AgentMode.DEFAULT)
+    val agentMode: StateFlow<com.anharness.app.agent.AgentMode> = _agentMode.asStateFlow()
 
     internal val _thinkingLevel = MutableStateFlow(ThinkingLevel.OFF)
     val thinkingLevel: StateFlow<ThinkingLevel> = _thinkingLevel.asStateFlow()
@@ -1815,6 +1830,12 @@ class ChatViewModel(
             subtitle = "",
         ),
         SlashCommand(
+            id = "mode",
+            icon = Icons.Default.Tune,
+            title = "Mode",
+            subtitle = "",
+        ),
+        SlashCommand(
             id = "thinking",
             icon = Icons.Default.Lightbulb,
             title = "Thinking",
@@ -1886,6 +1907,7 @@ class ChatViewModel(
             "compact" -> compactAll()
             "memory" -> toggleMemoryEnabled()
             "plan" -> togglePlanMode()
+            "mode" -> cycleAgentMode()
             "thinking" -> toggleThinking()
             "harness" -> toggleAgentLoop()
             "clear" -> _clearChatConfirmRequested.value = true
@@ -1940,6 +1962,35 @@ class ChatViewModel(
             } else {
                 "Plan mode disabled. The agent may act on approved plans directly."
             },
+            iconKind = "plan",
+        )
+    }
+
+    /**
+     * [T-android-agent-modes] Cycle the session's agent mode
+     * (standard → code → research → chat → …), persist, and narrate.
+     * Locked once the session has produced content — swapping tools
+     * mid-conversation would orphan recorded tool calls the new
+     * composition cannot execute (dsh agent-presets constraint).
+     */
+    private fun cycleAgentMode() {
+        val hasContent = _messages.value.any { it.role != "system" }
+        if (hasContent) {
+            appendSystemInfo(
+                text = "Agent mode is locked for this session (${_agentMode.value.displayName}). " +
+                    "Start a new session to pick a different mode.",
+                iconKind = "plan",
+            )
+            return
+        }
+        val next = with(com.anharness.app.agent.AgentMode.Companion) { _agentMode.value.next() }
+        _agentMode.value = next
+        viewModelScope.launch {
+            val sid = ensureSession()
+            chatRepository.dao.updateAgentMode(sid, next.id)
+        }
+        appendSystemInfo(
+            text = "Agent mode: ${next.displayName} — ${next.description}",
             iconKind = "plan",
         )
     }
@@ -4083,6 +4134,7 @@ class ChatViewModel(
             _sessionCategory.value = session.category
             _memoryEnabled.value = session.memoryEnabled != 0
             _planMode.value = session.planMode != 0
+            _agentMode.value = com.anharness.app.agent.AgentMode.fromId(session.agentMode)
             // T239: hydrate persisted thinking-mode override. null = unset
             // (use OFF as the legacy default); non-null = explicit user
             // choice persisted across cold-start. runCatching guards against
@@ -10430,14 +10482,21 @@ Plan mode is ACTIVE. You are in read-only planning mode:
                     enabled = _planMode.value,
                     text = planPolicySection,
                 ),
+                // [T-android-agent-modes] Mode guidance right after policy
+                // sections — STANDARD contributes nothing (byte-identical).
+                com.anharness.agent.PromptSection(
+                    "mode", order = 25,
+                    enabled = _agentMode.value.guidance != null,
+                    text = _agentMode.value.guidance.orEmpty(),
+                ),
                 com.anharness.agent.PromptSection(
                     "skills", order = 30,
-                    enabled = skillFragment != null,
+                    enabled = skillFragment != null && _agentMode.value.includeSkillSections,
                     text = skillFragment.orEmpty(),
                 ),
                 com.anharness.agent.PromptSection(
                     "mcp", order = 40,
-                    enabled = mcpFragment != null,
+                    enabled = mcpFragment != null && _agentMode.value.includeSkillSections,
                     text = mcpFragment.orEmpty(),
                 ),
                 com.anharness.agent.PromptSection(

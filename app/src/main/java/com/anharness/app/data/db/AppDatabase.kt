@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         WebAppShortcutEntity::class,
         FolderEntity::class,
     ],
-    version = 13,
+    version = 14,
     // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
     // validate every migration (and its downgrade counterpart) against the
     // committed schema json. Without it the upgrade/downgrade chain has no
@@ -327,6 +327,24 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Agent modes (dsh agent-presets parity): per-session `agent_mode`
+         * composition id on sessions. NOT NULL DEFAULT 'standard' — existing
+         * rows keep the legacy full-tool behavior.
+         */
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE sessions ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'standard'")
+            }
+        }
+
+        /** Downgrade 14 → 13: deliberate no-op; see [MIGRATION_12_11]. */
+        val MIGRATION_14_13 = object : Migration(14, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Intentionally empty — the agent_mode column is left in place.
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -341,6 +359,7 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6,
                         MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
                         MIGRATION_11_12, MIGRATION_12_11, MIGRATION_12_13, MIGRATION_13_12,
+                        MIGRATION_13_14, MIGRATION_14_13,
                     )
                     .build()
                     .also { INSTANCE = it }
