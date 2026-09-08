@@ -285,6 +285,10 @@ interface ChatDao {
     @Query("UPDATE sessions SET plan_mode = :enabled, updated_at = :updatedAt WHERE id = :id")
     suspend fun updatePlanMode(id: String, enabled: Int, updatedAt: Long = System.currentTimeMillis())
 
+    // Session: agent_mode (dsh agent-presets parity) — AgentMode.id string.
+    @Query("UPDATE sessions SET agent_mode = :mode, updated_at = :updatedAt WHERE id = :id")
+    suspend fun updateAgentMode(id: String, mode: String, updatedAt: Long = System.currentTimeMillis())
+
     // Session: thinking_override (T239) — null clears the explicit choice and
     // falls back to the current model/group default; non-null is a
     // ThinkingLevel.name string ("OFF"/"LOW"/"MEDIUM"/"HIGH"/"XHIGH").

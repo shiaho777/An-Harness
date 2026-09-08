@@ -1581,6 +1581,7 @@
     <string name="slash_memory_writes_off">Writes off — tap to toggle</string>
     <string name="slash_plan_on">Plan mode on — tap to toggle</string>
     <string name="slash_plan_off">Plan mode off — tap to toggle</string>
+    <string name="slash_mode_subtitle">%1$s — tap to cycle mode</string>
     <string name="slash_thinking_subtitle">Thinking %1$s — tap to toggle</string>
     <string name="slash_thinking_unsupported">Not supported by current model</string>
     <string name="slash_clear_subtitle">Clear all messages in this session</string>

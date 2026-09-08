@@ -119,6 +119,9 @@ internal fun ChatViewModel.filteredSlashCommands(): List<SlashCommand> {
                     else R.string.slash_plan_off,
                 ),
             )
+            "mode" -> cmd.copy(
+                subtitle = context.getString(R.string.slash_mode_subtitle, _agentMode.value.displayName),
+            )
             "thinking" -> cmd.copy(
                 subtitle = if (!currentModelSupportsReasoning) {
                     context.getString(R.string.slash_thinking_unsupported)
