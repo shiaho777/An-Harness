@@ -3385,6 +3385,25 @@ class ChatViewModel(
             callsIssued = spent,
         )
         return try {
+            // [T-android-pi-compaction] Try the pi structured pipeline first:
+            // Goal/Constraints/Progress/Decisions/Next Steps/Critical Context
+            // + file-op inventory, with iterative update when a previous
+            // summary exists. Falls back to the legacy plain-text summary on
+            // failure (provider unavailable, pipeline error, empty result).
+            val provider = currentProvider
+            if (provider != null) {
+                val piSummary = runCatching {
+                    com.anharness.app.harness.CompactionAdapter.summarizeAll(
+                        messages = messages,
+                        previousSummary = previousSummary,
+                        provider = provider,
+                    )
+                }.getOrNull()
+                if (!piSummary.isNullOrBlank()) {
+                    AppLogger.info(TAG, "[Compact] pi structured summary used (${piSummary.length} chars)")
+                    return piSummary
+                }
+            }
             generateCompactSummary(conversationText)
         } catch (e: CancellationException) {
             throw e
