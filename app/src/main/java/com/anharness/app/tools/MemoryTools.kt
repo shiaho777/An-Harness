@@ -9,7 +9,6 @@ import org.json.JSONObject
  * Schema matches iOS AgentToolDefinition exactly.
  */
 object MemoryTools {
-
     // -- Tool Definitions (Anthropic format) --
 
     fun memoryWriteToolDefinition(): JSONObject {
@@ -135,3 +134,18 @@ object MemoryTools {
         }
     }
 }
+
+/**
+ * Record of a memory tool call in the current session. Surfaced by the
+ * harness executor wrappers (ExecutorTools memory paths) and shown in the
+ * SessionMemorySheet. Top-level in the tools package — the harness layer
+ * constructs it and the ui layer only renders it, so neither nests it.
+ */
+data class MemoryToolRecord(
+    val title: String,
+    val isWrite: Boolean,
+    val preview: String,
+    val output: String,
+    val writtenContent: String? = null,
+    val keywords: String? = null,
+)

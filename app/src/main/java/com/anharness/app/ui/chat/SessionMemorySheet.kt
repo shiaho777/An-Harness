@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import android.content.Context
 import com.anharness.app.R
 import com.anharness.app.data.repository.MemoryRepository
+import com.anharness.app.tools.MemoryToolRecord
 import com.anharness.app.ui.settings.SettingsSection
 import com.anharness.app.ui.settings.SettingsValueRow
 import kotlinx.coroutines.delay
@@ -420,16 +421,10 @@ private fun MemoryToolRow(
 }
 
 /**
- * Record of a memory tool call in the current session.
+ * Record of a memory tool call in the current session. Lives in
+ * com.anharness.app.tools (MemoryTools.kt) — the harness-layer executor
+ * wrappers construct it, so it must not live in the ui layer.
  */
-data class MemoryToolRecord(
-    val title: String,
-    val isWrite: Boolean,
-    val preview: String,
-    val output: String,
-    val writtenContent: String? = null,
-    val keywords: String? = null,
-)
 
 /**
  * Sheet navigation state. Held by [SessionMemorySheet] so a back arrow in the

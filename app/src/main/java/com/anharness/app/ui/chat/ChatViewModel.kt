@@ -61,6 +61,7 @@ import com.anharness.app.tools.FileEditTool
 import com.anharness.app.tools.FileReadTool
 import com.anharness.app.tools.FileWriteTool
 import com.anharness.app.tools.MemoryTools
+import com.anharness.app.tools.MemoryToolRecord
 import com.anharness.app.tools.ReadImageTool
 import com.anharness.app.tools.ToolExecutionResult
 import com.anharness.app.offload.OffloadPermissionManager
@@ -1289,6 +1290,12 @@ class ChatViewModel(
 
     private val _memoryToolRecords = MutableStateFlow<List<MemoryToolRecord>>(emptyList())
     val memoryToolRecords: StateFlow<List<MemoryToolRecord>> = _memoryToolRecords.asStateFlow()
+
+    /** [P2 #16] Callback handed to the harness-layer memory executors so the
+     *  SessionMemorySheet keeps working when calls route through AgentLoop. */
+    private fun recordMemoryToolCall(record: MemoryToolRecord) {
+        _memoryToolRecords.value = _memoryToolRecords.value + record
+    }
 
     /**
      * Revoke a previously recorded memory_write by removing its entry from
@@ -9447,12 +9454,102 @@ class ChatViewModel(
             // bindMounts map and would surface another session's
             // /var/minis/{workspace,attachments,offloads,browser} files.
             ReadImageTool.NAME -> executeReadImageTool(argsJson)
-            "shell_execute" -> executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText)
-            "browser_use" -> executeBrowserUseTool(argsJson)
-            "memory_write" -> executeMemoryWriteTool(argsJson)
-            "memory_get" -> executeMemoryGetTool(argsJson)
+            // [P2 #16] shell/browser/memory route through the harness-layer
+            // executors (ExecutorTools) when the pilot flag is on — same
+            // bodies, new home. Legacy inline executors remain as fallback
+            // for a harness-layer failure; behavior is otherwise identical.
+            "shell_execute" -> executeViaHarness(
+                fallback = { executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText) },
+            ) {
+                com.anharness.app.harness.HarnessBridge.executePilotTool(
+                    name = "shell_execute",
+                    toolCallId = toolId,
+                    argsJson = argsJson,
+                    context = context,
+                    sessionId = { activeSessionId },
+                    deps = harnessExecutorDeps(),
+                    onShellLine = { line ->
+                        val idx = toolBlocks.indexOfFirst { it.id == toolId }
+                        if (idx >= 0) {
+                            val current = toolBlocks[idx].content
+                            val updated = if (current.isEmpty()) line else "$current\n$line"
+                            // Keep last 50 lines for display
+                            val trimmed = updated.lines().takeLast(50).joinToString("\n")
+                            toolBlocks[idx] = toolBlocks[idx].copy(content = trimmed)
+                            viewModelScope.launch(Dispatchers.Main) {
+                                updateAssistantMessage(assistantId, currentText, true, toolBlocks)
+                            }
+                        }
+                    },
+                )
+            }
+            "browser_use" -> executeViaHarness(
+                fallback = { executeBrowserUseTool(argsJson) },
+            ) {
+                com.anharness.app.harness.HarnessBridge.executePilotTool(
+                    name = "browser_use",
+                    toolCallId = toolId,
+                    argsJson = argsJson,
+                    context = context,
+                    sessionId = { activeSessionId },
+                    deps = harnessExecutorDeps(),
+                )
+            }
+            "memory_write" -> executeViaHarness(
+                fallback = { executeMemoryWriteTool(argsJson) },
+            ) {
+                com.anharness.app.harness.HarnessBridge.executePilotTool(
+                    name = "memory_write",
+                    toolCallId = toolId,
+                    argsJson = argsJson,
+                    context = context,
+                    sessionId = { activeSessionId },
+                    deps = harnessExecutorDeps(),
+                    onMemoryRecord = ::recordMemoryToolCall,
+                )
+            }
+            "memory_get" -> executeViaHarness(
+                fallback = { executeMemoryGetTool(argsJson) },
+            ) {
+                com.anharness.app.harness.HarnessBridge.executePilotTool(
+                    name = "memory_get",
+                    toolCallId = toolId,
+                    argsJson = argsJson,
+                    context = context,
+                    sessionId = { activeSessionId },
+                    deps = harnessExecutorDeps(),
+                    onMemoryRecord = ::recordMemoryToolCall,
+                )
+            }
             "exit_plan_mode" -> executeExitPlanMode(argsJson)
             else -> ToolExecutionResult("Unknown tool: $name", false)
+        }
+    }
+
+    /** [P2 #16] ViewModel-owned shared state the harness executors need. */
+    private fun harnessExecutorDeps(): com.anharness.app.harness.HarnessBridge.ExecutorDependencies =
+        object : com.anharness.app.harness.HarnessBridge.ExecutorDependencies {
+            override val memoryRepository: MemoryRepository? get() = this@ChatViewModel.memoryRepository
+            override val memoryEnabled: Boolean get() = _memoryEnabled.value
+            override val browserTabPool: BrowserTabPool get() = this@ChatViewModel.browserTabPool
+        }
+
+    /**
+     * [P2 #16] Pilot routing: run the harness executor when the AgentLoop
+     * flag is on, falling back to the legacy inline executor if it throws.
+     * The executors themselves are total (failures are error results), so
+     * the fallback only ever fires on wiring/args bugs — the same policy the
+     * file_read pilot has had since P1.
+     */
+    private suspend fun executeViaHarness(
+        fallback: suspend () -> ToolExecutionResult,
+        harness: suspend () -> ToolExecutionResult,
+    ): ToolExecutionResult {
+        if (!_useAgentLoop.value) return fallback()
+        return runCatching { harness() }.getOrElse { e ->
+            AppLogger.warning("ChatViewModel",
+                "harness executor failed, legacy fallback: ${e.message}")
+            fallback()
         }
     }
 
