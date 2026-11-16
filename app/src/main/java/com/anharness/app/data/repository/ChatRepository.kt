@@ -113,6 +113,9 @@ class ChatRepository(internal val dao: ChatDao) {
         // [T-scheduled-force-approval] Session-scoped tool grants/denials
         // die with the session — clearSessionGrants had no caller before.
         OffloadPermissionManager.clearSessionGrants(id)
+        // [T-phone-safety-gate] Phone-control app overrides are session-
+        // scoped too — an unlocked payment app must re-lock with the session.
+        com.anharness.app.phone.PhoneSafetyManager.clearSession(id)
     }
 
     // ─── Session groups ("folders") ────────────────────────────────────────

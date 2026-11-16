@@ -100,6 +100,10 @@ object OffloadPermissionManager {
         // the honest default for the settings row. Hidden from Settings:
         // the level cannot loosen the mandatory per-call card.
         ToolPermissionInfo("scheduled_task", "Scheduled Tasks", PermissionCategory.SYSTEM, PermissionLevel.ASK_ONCE, showInSettings = false),
+        // [T-phone-safety-gate] Phone-control approval cards. ASK_ONCE +
+        // hidden: every card goes through enforceAlwaysAsk (level cannot
+        // skip it), and the hard blocks live in PhoneSafetyGate, not here.
+        ToolPermissionInfo("phone_control", "Phone Control", PermissionCategory.INTEGRATIONS, PermissionLevel.ASK_ONCE, showInSettings = false),
     )
 
     /**

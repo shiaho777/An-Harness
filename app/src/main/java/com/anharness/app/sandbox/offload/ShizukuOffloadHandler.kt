@@ -80,6 +80,11 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
             ShizukuManager.State.READY -> { /* fall through */ }
         }
 
+        // [T-phone-safety-gate] input/exec can drive the UI exactly like
+        // a11y_cli — route them through the same final safety gate so the
+        // blocklist/per-call cards cannot be bypassed by picking Shizuku.
+        phoneGateFor(group, rest, args, request.sessionId)?.let { return it }
+
         return try {
             when (group) {
                 "package" -> handlePackage(rest, args)
@@ -105,6 +110,67 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
             AppLogger.warning(TAG, "group=$group failed: ${t.message}")
             errEnvelope("OPERATION_FAILED", t.message ?: "unknown", args)
         }
+    }
+
+    // ─── Phone safety gate ─────────────────────────────────────────────────
+
+    /**
+     * [T-phone-safety-gate] Same final gate as a11y_cli. `input` always
+     * mutates; `exec` is inspected for UI-injection / screenshot commands
+     * (input/screencap/settings put/am start) — other exec commands keep
+     * the existing tool-level permission only.
+     */
+    private fun phoneGateFor(
+        group: String,
+        rest: List<String>,
+        args: OffloadArgs,
+        sessionId: String?,
+    ): NativeOffloadResult? {
+        val action = when {
+            group == "input" -> "input.${rest.firstOrNull() ?: "unknown"}"
+            group == "exec" && execTouchesUi(rest) -> "exec.ui"
+            else -> return null
+        }
+        val svc = com.anharness.app.accessibility.MinisAccessibilityService.getInstance()
+        val (pkg, _) = svc?.foregroundPackage() ?: (null to null)
+        val sid = sessionId ?: com.anharness.app.offload.OffloadPermissionManager.OFFLOAD_GLOBAL_SESSION_ID
+        val override = com.anharness.app.phone.PhoneSafetyManager.hasOverride(sid, pkg)
+        // Shizuku input cannot target a specific node; password detection
+        // happens on the a11y path. App-level blocks still apply here.
+        var (verdict, reason) = com.anharness.app.phone.PhoneSafetyGate.decide(action, pkg, false, override)
+        if (verdict == com.anharness.app.phone.PhoneSafetyGate.Verdict.DENY) {
+            val unlocked = pkg != null && kotlinx.coroutines.runBlocking {
+                com.anharness.app.phone.PhoneSafetyManager.requestOverride(sid, pkg)
+            }
+            if (!unlocked) {
+                return errEnvelope(
+                    "SAFETY_BLOCKED",
+                    com.anharness.app.phone.PhoneSafetyGate.denyMessage(reason!!, pkg),
+                    args,
+                )
+            }
+            val re = com.anharness.app.phone.PhoneSafetyGate.decide(action, pkg, false, true)
+            verdict = re.first; reason = re.second
+        }
+        if (verdict == com.anharness.app.phone.PhoneSafetyGate.Verdict.ASK) {
+            val label = "Phone control (Shizuku): $action" + (pkg?.let { " in $it" } ?: "")
+            val allowed = kotlinx.coroutines.runBlocking {
+                com.anharness.app.phone.PhoneSafetyManager.requestActionApproval(sid, label)
+            }
+            if (!allowed) {
+                return errEnvelope("SAFETY_DENIED", "Phone control action '$action' was not approved.", args)
+            }
+        }
+        return null
+    }
+
+    /** Heuristic: does an exec command line inject UI events or capture the screen? */
+    private fun execTouchesUi(rest: List<String>): Boolean {
+        val cmd = rest.joinToString(" ").lowercase()
+        return Regex("""\binput\s+(tap|swipe|text|keyevent|roll|motionevent)\b""").containsMatchIn(cmd) ||
+            Regex("""\bscreencap\b""").containsMatchIn(cmd) ||
+            Regex("""\bsettings\s+(put|delete)\b""").containsMatchIn(cmd) ||
+            Regex("""\bam\s+(start|force-stop)\b""").containsMatchIn(cmd)
     }
 
     // ─── Group: service ────────────────────────────────────────────────────
