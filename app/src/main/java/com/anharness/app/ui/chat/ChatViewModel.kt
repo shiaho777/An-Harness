@@ -1235,6 +1235,10 @@ class ChatViewModel(
             enabledTools = _agentMode.value.let {
                 if (it == com.anharness.app.agent.AgentMode.STANDARD) null else it.enabledTools
             },
+            // [T-phone-native-tool] Live service state — the catalog is
+            // recomputed on each read, so enabling/disabling the service
+            // takes effect on the next turn without a VM rebuild.
+            phoneControlAvailable = com.anharness.app.accessibility.MinisAccessibilityService.getInstance() != null,
         )
 
     /**
@@ -9456,6 +9460,11 @@ class ChatViewModel(
             // bindMounts map and would surface another session's
             // /var/minis/{workspace,attachments,offloads,browser} files.
             ReadImageTool.NAME -> executeReadImageTool(argsJson)
+            // [T-phone-native-tool] Phone control runs the same safety gate
+            // as the offload CLIs; screenshots return pixels inline and a
+            // session offloads path for read_image.
+            com.anharness.app.tools.PhoneUseTool.NAME ->
+                com.anharness.app.tools.PhoneUseTool.execute(argsJson, activeSessionId, context)
             // [P2 #16] shell/browser/memory route through the harness-layer
             // executors (ExecutorTools) when the pilot flag is on — same
             // bodies, new home. Legacy inline executors remain as fallback
@@ -12809,6 +12818,7 @@ Plan mode is ACTIVE. You are in read-only planning mode:
         "file_write" -> "Write File"
         "file_edit" -> "Edit File"
         "browser_use" -> "Browse Web"
+        "phone_use" -> "Control Phone"
         "read_image" -> "Read Image"
         "memory_write" -> "Write Memory"
         "memory_get" -> "Read Memory"

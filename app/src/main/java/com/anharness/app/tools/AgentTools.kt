@@ -31,6 +31,10 @@ object AgentTools {
         // tools whose name is in this set are exposed. null = everything the
         // other toggles produce (STANDARD mode, byte-identical to legacy).
         enabledTools: Set<String>? = null,
+        // [T-phone-native-tool] Expose phone_use only while the accessibility
+        // service is actually connected — otherwise the model would call a
+        // tool that can only return SERVICE_NOT_RUNNING.
+        phoneControlAvailable: Boolean = false,
     ): List<AgentToolDefinition> = buildList {
         add(shellExecuteDefinition())
         add(FileReadTool.definition())
@@ -40,6 +44,9 @@ object AgentTools {
             add(ReadImageTool.definition())
         }
         add(browserUseDefinition())
+        if (phoneControlAvailable) {
+            add(PhoneUseTool.definition())
+        }
         if (memoryEnabled) {
             add(memoryWriteDefinition())
             add(memoryGetDefinition())

@@ -374,8 +374,14 @@ object OffloadPermissionManager {
             ?: return PermissionLevel.BYPASS // Unknown tools are bypassed
 
         val override = levelStoreOverride
-        val stored = if (override != null) override["level_$toolName"]
-            else prefs.getString("level_$toolName", null)
+        // [T-phone-native-tool] prefs is lateinit (installed by init at app
+        // startup). A read before init — early startup or a JVM test — must
+        // fall back to the registry default, not crash.
+        val stored = when {
+            override != null -> override["level_$toolName"]
+            ::prefs.isInitialized -> prefs.getString("level_$toolName", null)
+            else -> null
+        }
         return if (stored != null) {
             try { PermissionLevel.valueOf(stored) } catch (_: Exception) { info.defaultLevel }
         } else {

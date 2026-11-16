@@ -177,7 +177,7 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         phoneGate(args, sub, request.sessionId)?.let { return it }
         return try {
             when (sub) {
-                "ui"        -> uiSub(args)
+                "ui"        -> uiSub(args, request.sessionId)
                 "tap"       -> tapSub(args)
                 "input"     -> inputSub(args)
                 "scroll"    -> scrollSub(args)
@@ -322,14 +322,14 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
 
     // ── ui ───────────────────────────────────────────────────────────────
 
-    private fun uiSub(args: OffloadArgs): NativeOffloadResult {
+    private fun uiSub(args: OffloadArgs, sessionId: String? = null): NativeOffloadResult {
         return when (args.positional.getOrNull(1)) {
             null         -> NativeOffloadResult(2, UI_HELP)
             "dump"       -> uiDump(args)
             "find"       -> uiFind(args)
             "info"       -> uiInfo(args)
             "node"       -> uiNode(args)
-            "screenshot" -> uiScreenshot(args)
+            "screenshot" -> uiScreenshot(args, sessionId)
             else         -> NativeOffloadResult(2, "$TOOL ui: unknown action\n$UI_HELP")
         }
     }
@@ -483,7 +483,7 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         return ok(args, data)
     }
 
-    private fun uiScreenshot(args: OffloadArgs): NativeOffloadResult {
+    private fun uiScreenshot(args: OffloadArgs, sessionId: String? = null): NativeOffloadResult {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             return err(args, "NOT_SUPPORTED",
                 "ui screenshot requires Android 11 (API 30); use `android-shizuku-cli exec screencap` instead.")
@@ -530,12 +530,26 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             return ok(args, data)
         }
 
-        val dir = (context.getExternalFilesDir("a11y_screenshots") ?: java.io.File(context.cacheDir, "a11y_screenshots"))
+        // [T-phone-native-tool] With a chat session, write into the session
+        // offloads dir so the agent can address the shot via a Linux path
+        // (read_image / shell). The old externalFilesDir location was NOT
+        // bind-mounted into PRoot, so the returned host path was unreadable
+        // from inside the sandbox. No session → legacy host path.
+        val dir: java.io.File
+        val linuxDir: String?
+        if (sessionId != null) {
+            dir = java.io.File(context.filesDir, "minis-sessions/$sessionId/offloads/phone")
+            linuxDir = "/var/minis/offloads/phone"
+        } else {
+            dir = (context.getExternalFilesDir("a11y_screenshots") ?: java.io.File(context.cacheDir, "a11y_screenshots"))
+            linuxDir = null
+        }
         if (!dir.exists()) dir.mkdirs()
         val file = java.io.File(dir, "a11y_${System.currentTimeMillis()}.png")
         return try {
             java.io.FileOutputStream(file).use { it.write(pngBytes) }
-            data.put("path", file.absolutePath)
+            data.put("path", if (linuxDir != null) "$linuxDir/${file.name}" else file.absolutePath)
+            data.put("hostPath", file.absolutePath)
             ok(args, data)
         } catch (t: Throwable) {
             AppLogger.warning(TAG, "screenshot write failed: ${t.message}")
