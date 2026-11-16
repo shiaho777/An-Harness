@@ -81,7 +81,10 @@ private data class ModelStats(
     val distinctDays: MutableSet<String> = mutableSetOf(),
     val distinctSessions: MutableSet<String> = mutableSetOf(),
 ) {
-    val totalInput: Long get() = inputTokens + cacheReadTokens + cacheCreationTokens
+    // [T-usage-full-input-contract] inputTokens is the FULL prompt (cache
+    // included) under the unified provider contract — cacheRead/cacheCreation
+    // are subsets shown separately, never added on top (double-counting).
+    val totalInput: Long get() = inputTokens
 }
 
 private data class ProviderGroup(val name: String, val models: List<ModelStats>)

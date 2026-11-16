@@ -3404,6 +3404,10 @@ class ChatViewModel(
                         messages = messages,
                         previousSummary = previousSummary,
                         provider = provider,
+                        // [T-usage-anchored-compaction] Real API count beats
+                        // chars/4 (which undercounts CJK ~4x); 0 = no usage
+                        // yet → adapter keeps the heuristic.
+                        latestContextTokens = _lastTurnContextTokens.value,
                     )
                 }.getOrNull()
                 if (!piSummary.isNullOrBlank()) {
@@ -8449,13 +8453,11 @@ class ChatViewModel(
                         if (chunk.usage.latestContextTokens > 0) {
                             lastContextTokens = chunk.usage.latestContextTokens
                         } else if (chunk.usage.inputTokens > 0) {
-                            // Fallback when a provider omits latestContextTokens: inputTokens is
-                            // now fresh-only (cached portion subtracted in the parser), so add the
-                            // cache back to recover the true context size — otherwise a high
-                            // cache-hit turn would under-report context pressure and skip offload.
-                            lastContextTokens = chunk.usage.inputTokens +
-                                (chunk.usage.cacheReadInputTokens ?: 0) +
-                                (chunk.usage.cacheCreationInputTokens ?: 0)
+                            // [T-usage-full-input-contract] Fallback when a provider omits
+                            // latestContextTokens: inputTokens is already the FULL prompt
+                            // (cache included) under the unified contract — use it verbatim.
+                            // Adding cacheRead/cacheWrite here would double-count the cache.
+                            lastContextTokens = chunk.usage.inputTokens
                         }
                         if (lastContextTokens > 0) {
                             _lastTurnContextTokens.value = lastContextTokens

@@ -137,7 +137,14 @@ interface LLMProvider {
  */
 fun Flow<LLMStreamChunk>.failOnSilentEmptyCompletion(providerName: String): Flow<LLMStreamChunk> = flow {
     var sawContent = false
-    var sawFinishReason = false
+    // [T-openai-nonstream-fallback] A Finished chunk IS the terminal
+    // marker — even with a null stopReason (e.g. a non-streaming body
+    // with empty choices and no finish_reason). The old guard demanded
+    // a non-null reason and flagged such legitimate empty replies as
+    // upstream drops. A genuine silent drop never emits Finished at all
+    // (the provider only synthesises one when it actually saw a finish
+    // reason on the wire), so "any Finished" keeps that detection intact.
+    var sawFinished = false
     collect { chunk ->
         when (chunk) {
             is LLMStreamChunk.Text -> if (chunk.text.isNotEmpty()) sawContent = true
@@ -147,12 +154,12 @@ fun Flow<LLMStreamChunk>.failOnSilentEmptyCompletion(providerName: String): Flow
             is LLMStreamChunk.ToolInputDelta,
             is LLMStreamChunk.ToolCallComplete,
             is LLMStreamChunk.MediaAttachment -> sawContent = true
-            is LLMStreamChunk.Finished -> if (chunk.stopReason != null) sawFinishReason = true
+            is LLMStreamChunk.Finished -> sawFinished = true
             else -> {}
         }
         emit(chunk)
     }
-    if (!sawContent && !sawFinishReason) {
+    if (!sawContent && !sawFinished) {
         android.util.Log.w(
             "LLMProvider",
             "$providerName: stream completed with no content and no finish reason — treating as transient upstream failure",

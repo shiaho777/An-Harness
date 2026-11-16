@@ -1019,13 +1019,23 @@ class AnthropicProvider(
     }
 
     private fun parseUsage(json: JSONObject): LLMUsage {
-        val inputTokens = json.optInt("input_tokens", 0)
+        // [T-usage-full-input-contract] Anthropic's `input_tokens` counts
+        // only the UNCACHED portion; cache_creation/cache_read are separate
+        // counters. Normalise to the app-wide contract (inputTokens = FULL
+        // prompt, cache fields = subsets) so usage display and context
+        // pressure match OpenAI/Gemini. Before this, latestContextTokens
+        // missed the cached bulk — a 99%-cache turn looked like a tiny
+        // context and skipped offload/compaction pressure checks.
+        val uncached = json.optInt("input_tokens", 0)
+        val cacheWrite = json.optInt("cache_creation_input_tokens", 0)
+        val cacheRead = json.optInt("cache_read_input_tokens", 0)
+        val fullInput = uncached + cacheWrite + cacheRead
         return LLMUsage(
-            inputTokens = inputTokens,
+            inputTokens = fullInput,
             outputTokens = json.optInt("output_tokens", 0),
-            cacheCreationInputTokens = json.optInt("cache_creation_input_tokens").takeIf { it > 0 },
-            cacheReadInputTokens = json.optInt("cache_read_input_tokens").takeIf { it > 0 },
-            latestContextTokens = inputTokens,
+            cacheCreationInputTokens = cacheWrite.takeIf { it > 0 },
+            cacheReadInputTokens = cacheRead.takeIf { it > 0 },
+            latestContextTokens = fullInput,
         )
     }
 

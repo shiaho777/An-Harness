@@ -582,12 +582,15 @@ class OpenAIProvider private constructor(
     }
 
     /**
-     * Non-streaming entry point. Some providers (e.g. GPT-5.x via certain
-     * gateways, Codex Responses backend) reject `stream=false` outright with
-     * `[400] Stream must be set to true`. To keep this method usable across
-     * all providers we always issue a streaming request internally and
-     * concatenate the deltas back into a single [LLMResponse]. Callers that
-     * actually want incremental delivery should use [streamMessage] instead.
+     * Non-streaming entry point. [T-openai-nonstream-fallback] Issues a real
+     * `stream=false` request (no stream_options) — the read loop's
+     * non-streaming branch materialises the single JSON body into chunks.
+     * Some providers (e.g. GPT-5.x via certain gateways, Codex Responses
+     * backend) reject `stream=false` outright with `[400] Stream must be
+     * set to true`; on that specific rejection we retry once through the
+     * streaming path and concatenate deltas, preserving the old behavior
+     * for those endpoints. Callers that want incremental delivery should
+     * use [streamMessage] instead.
      */
     override suspend fun sendMessageClamped(
         messages: List<LLMMessage>,
@@ -598,32 +601,57 @@ class OpenAIProvider private constructor(
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
     ): LLMResponse = withContext(Dispatchers.IO) {
-        val textBuf = StringBuilder()
-        var stopReason: String? = null
-        var usage: LLMUsage? = null
-        // [T-codex-gpt-image2-oauth-android] Collect model-generated media
-        // (gpt-image-2 images) so non-streaming callers — notably
-        // minis-model-use (ModelUseOffloadHandler) — get them on
-        // LLMResponse.mediaAttachments and can write the image to --output.
-        val media = mutableListOf<LLMMediaAttachment>()
-        streamMessage(
-            messages = messages,
-            systemPrompt = systemPrompt,
-            maxTokens = maxTokens,
-            temperature = temperature,
-            imageParts = imageParts,
-            tools = tools,
-            thinkingLevel = thinkingLevel,
-        ).collect { chunk ->
-            when (chunk) {
-                is LLMStreamChunk.Text -> textBuf.append(chunk.text)
-                is LLMStreamChunk.Usage -> usage = chunk.usage
-                is LLMStreamChunk.Finished -> stopReason = chunk.stopReason
-                is LLMStreamChunk.MediaAttachment -> media.add(chunk.attachment)
-                else -> Unit
+        // [T-openai-nonstream-fallback] The old path delegated to
+        // streamMessage, which clamps structurally. Calling rawStreamMessage
+        // directly bypasses that clamp — re-apply it here so an over-range
+        // level can never reach the wire (ThinkingRulesRegression contract).
+        val clamped = clampThinkingLevel(thinkingLevel)
+        suspend fun collectFrom(flow: kotlinx.coroutines.flow.Flow<LLMStreamChunk>): LLMResponse {
+            val textBuf = StringBuilder()
+            var stopReason: String? = null
+            var usage: LLMUsage? = null
+            // [T-codex-gpt-image2-oauth-android] Collect model-generated media
+            // (gpt-image-2 images) so non-streaming callers — notably
+            // minis-model-use (ModelUseOffloadHandler) — get them on
+            // LLMResponse.mediaAttachments and can write the image to --output.
+            val media = mutableListOf<LLMMediaAttachment>()
+            flow.collect { chunk ->
+                when (chunk) {
+                    is LLMStreamChunk.Text -> textBuf.append(chunk.text)
+                    is LLMStreamChunk.Usage -> usage = chunk.usage
+                    is LLMStreamChunk.Finished -> stopReason = chunk.stopReason
+                    is LLMStreamChunk.MediaAttachment -> media.add(chunk.attachment)
+                    else -> Unit
+                }
             }
+            return LLMResponse(textBuf.toString(), stopReason, usage, media)
         }
-        LLMResponse(textBuf.toString(), stopReason, usage, media)
+        try {
+            collectFrom(
+                rawStreamMessage(
+                    messages, systemPrompt, maxTokens, temperature, imageParts, tools, clamped,
+                    stream = false,
+                ).failOnSilentEmptyCompletion(name),
+            )
+        } catch (e: LLMError.ProviderError) {
+            // Gateway demands streaming ("[400] Stream must be set to true")
+            // — fall back to the aggregate path. Narrow match so unrelated
+            // 400s (bad model, bad params) still surface immediately.
+            val msg = e.message.orEmpty()
+            if (msg.contains("[400]") && msg.contains("stream", ignoreCase = true)) {
+                collectFrom(
+                    streamMessage(
+                        messages = messages,
+                        systemPrompt = systemPrompt,
+                        maxTokens = maxTokens,
+                        temperature = temperature,
+                        imageParts = imageParts,
+                        tools = tools,
+                        thinkingLevel = thinkingLevel,
+                    ),
+                )
+            } else throw e
+        }
     }
 
     override fun streamMessageClamped(
@@ -646,6 +674,10 @@ class OpenAIProvider private constructor(
         imageParts: List<LLMMessage.ImagePart>,
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
+        // [T-openai-nonstream-fallback] false → request a single JSON body
+        // (stream=false, no stream_options). The read loop's non-streaming
+        // branch materialises it into the same chunk sequence.
+        stream: Boolean = true,
     ): Flow<LLMStreamChunk> = callbackFlow {
         val body = if (isCodexImageModel) {
             // [T-gpt-image2-codex-backend-route-android] gpt-image-2 on an
@@ -672,9 +704,9 @@ class OpenAIProvider private constructor(
             )
             buildCodexImageBody(messages)
         } else if (usesChatCompletionsAPI) {
-            buildRequestBody(messages, systemPrompt, maxTokens, stream = true, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
+            buildRequestBody(messages, systemPrompt, maxTokens, stream = stream, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
         } else {
-            buildResponsesAPIBody(messages, systemPrompt, maxTokens, stream = true, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
+            buildResponsesAPIBody(messages, systemPrompt, maxTokens, stream = stream, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
         }
         // T302: serialize the request body exactly once. Pre-T302 we called
         // body.toString() three times per request (debug log + OAuth byte
@@ -945,8 +977,73 @@ class OpenAIProvider private constructor(
             // Branch streaming parser based on API format
             val isResponsesAPI = !usesChatCompletionsAPI
 
-            while (reader.readLine().also { line = it } != null) {
-                val l = line ?: continue
+            // [T-openai-nonstream-fallback] Some OpenAI-compatible gateways
+            // ignore stream=true and reply with a single non-streaming JSON
+            // body (choices[].message instead of SSE deltas). The old loop
+            // skipped every line (no "data:" prefix) and the turn surfaced
+            // as a bogus "empty response" transient error. Detect that shape
+            // on the first non-blank line and parse the whole body at once.
+            var pendingLine: String? = null
+            run {
+                var first: String?
+                while (reader.readLine().also { first = it } != null) {
+                    val t = first!!.trim()
+                    if (t.isEmpty()) continue
+                    if (t.startsWith("{")) {
+                        val whole = t + reader.readText()
+                        val obj = runCatching { JSONObject(whole) }.getOrNull()
+                        val choices = obj?.optJSONArray("choices")
+                        // A ChatCompletions-shaped body: choices present (even
+                        // empty) — with or without a message on choice 0.
+                        if (obj != null && choices != null) {
+                            val choice0 = choices.optJSONObject(0)
+                            val message = choice0?.optJSONObject("message")
+                            val content = message?.optString("content", "").orEmpty()
+                            if (content.isNotEmpty()) send(LLMStreamChunk.Text(content))
+                            val rc = message?.optString("reasoning_content", "").orEmpty()
+                            if (rc.isNotEmpty()) {
+                                send(LLMStreamChunk.ThinkingDelta(rc))
+                                send(LLMStreamChunk.ReasoningContent(rc))
+                            }
+                            message?.optJSONArray("tool_calls")?.let { calls ->
+                                for (i in 0 until calls.length()) {
+                                    val c = calls.optJSONObject(i) ?: continue
+                                    val fn = c.optJSONObject("function") ?: continue
+                                    val callId = c.optString("id", "call_$i")
+                                    val name = fn.optString("name", "")
+                                    val argsStr = fn.optString("arguments", "{}")
+                                    send(LLMStreamChunk.ToolUseStart(callId, name))
+                                    if (argsStr.isNotEmpty()) send(LLMStreamChunk.ToolInputDelta(callId, argsStr))
+                                    val argsJson = runCatching { JSONObject(argsStr) }
+                                        .getOrDefault(JSONObject())
+                                    send(LLMStreamChunk.ToolCallComplete(callId, name, argsJson))
+                                }
+                            }
+                            obj.optJSONObject("usage")?.let {
+                                send(LLMStreamChunk.Usage(parseChatCompletionsUsage(it)))
+                                sawUsageBlock = true
+                            }
+                            val fr = choice0?.optString("finish_reason")
+                                ?.takeIf { f -> f.isNotEmpty() && f != "null" }
+                            if (fr != null) {
+                                finishReason = fr
+                                sawFinishReason = true
+                            }
+                            send(LLMStreamChunk.Finished(fr))
+                            sentFinished = true
+                            break
+                        }
+                    }
+                    // Normal SSE (or unrecognised) — hand the line to the loop.
+                    pendingLine = first
+                    break
+                }
+            }
+
+            while (true) {
+                val l = pendingLine ?: (reader.readLine() ?: break)
+                pendingLine = null
+                if (sentFinished) break
                 // Tolerate `data:` with or without the optional space — the
                 // HTML5 SSE spec only treats one leading space as ignorable,
                 // and some OpenAI-compatible servers (e.g. China Telecom's
@@ -2479,16 +2576,15 @@ class OpenAIProvider private constructor(
         val cacheRead = usage.optJSONObject("prompt_tokens_details")
             ?.optInt("cached_tokens")?.takeIf { it > 0 }
             ?: usage.optInt("prompt_cache_hit_tokens", 0).takeIf { it > 0 }
-        // OpenAI/DeepSeek `prompt_tokens` is the FULL input (cached + fresh), so
-        // subtract the cached portion to keep `inputTokens` meaning fresh-only —
-        // matching the Anthropic convention. Otherwise the cached tokens are
-        // counted twice in `input + cacheRead` (deflates the cache-hit rate;
-        // DeepSeek 99% hit showed as ~48%). Guard: only subtract when it stays
-        // non-negative; no cache field (cacheRead == null) → unchanged.
-        // latestContextTokens stays the full prompt (that IS the context size).
-        val freshInput = cacheRead?.let { (promptTokens - it).takeIf { d -> d >= 0 } } ?: promptTokens
+        // [T-usage-full-input-contract] `prompt_tokens` is the FULL input
+        // (cached subset included) and stays that way in `inputTokens` —
+        // the wire contract the tests pin (prompt=100/cached=50 → input=100).
+        // cacheRead is reported ALONGSIDE as a subset, never added on top:
+        // consumers must not compute input+cacheRead (that double-counts the
+        // cache and deflated DeepSeek's 99% hit rate to ~48% before this fix).
+        // latestContextTokens is the same full prompt (the context size).
         return LLMUsage(
-            inputTokens = freshInput,
+            inputTokens = promptTokens,
             outputTokens = usage.optInt("completion_tokens", 0),
             cacheReadInputTokens = cacheRead,
             latestContextTokens = promptTokens,
@@ -3413,14 +3509,13 @@ class OpenAIProvider private constructor(
         // making T126's prompt_cache_key wiring look like it had no effect.
         val cacheRead = usage.optJSONObject("input_tokens_details")
             ?.optInt("cached_tokens")?.takeIf { it > 0 }
-        // `input_tokens` is the FULL input (cached subset included); subtract the
-        // cached portion so `inputTokens` is fresh-only, matching Anthropic — else
-        // the cache is counted twice in `input + cacheRead` (deflates hit rate).
-        // Guard: only subtract when non-negative; no cache field → unchanged.
-        // latestContextTokens stays the full input (that IS the context size).
-        val freshInput = cacheRead?.let { (inputTokens - it).takeIf { d -> d >= 0 } } ?: inputTokens
+        // [T-usage-full-input-contract] Same contract as Chat Completions:
+        // `input_tokens` is the FULL input (cached subset included) and is
+        // kept verbatim; cacheRead rides alongside as a subset. Consumers
+        // must not add input+cacheRead (double-counts the cache).
+        // latestContextTokens is the same full input (the context size).
         return LLMUsage(
-            inputTokens = freshInput,
+            inputTokens = inputTokens,
             outputTokens = usage.optInt("output_tokens", 0),
             cacheReadInputTokens = cacheRead,
             latestContextTokens = inputTokens,

@@ -499,9 +499,15 @@ class GeminiProvider(
 
     private fun extractUsage(json: JSONObject): LLMUsage? {
         val usage = json.optJSONObject("usageMetadata") ?: return null
+        // [T-usage-full-input-contract] promptTokenCount is already the FULL
+        // prompt (cached subset included); cachedContentTokenCount rides
+        // alongside as a subset, never added on top.
+        val prompt = usage.optInt("promptTokenCount", 0)
         return LLMUsage(
-            inputTokens = usage.optInt("promptTokenCount", 0),
+            inputTokens = prompt,
             outputTokens = usage.optInt("candidatesTokenCount", 0),
+            cacheReadInputTokens = usage.optInt("cachedContentTokenCount", 0).takeIf { it > 0 },
+            latestContextTokens = prompt,
         )
     }
 
