@@ -105,6 +105,29 @@ class AgentSessionStore(
                 put("role", "assistant")
                 put("text", m.text)
                 put("stopReason", m.stopReason.name)
+                // [T-session-toolcalls-persistence] toolCalls used to be
+                // dropped here — a loaded/forked session then contained
+                // ToolResults whose calling Assistant turn had no calls,
+                // which providers reject (orphaned tool_result) and which
+                // breaks compaction's turn-boundary logic. Persist them.
+                if (m.toolCalls.isNotEmpty()) {
+                    put("toolCalls", kotlinx.serialization.json.buildJsonArray {
+                        m.toolCalls.forEach { call ->
+                            add(buildJsonObject {
+                                put("id", call.id)
+                                put("name", call.name)
+                                put("arguments", call.arguments)
+                            })
+                        }
+                    })
+                }
+                // Usage anchor survives reloads too (compaction estimates).
+                m.usage?.let { u ->
+                    put("usage", buildJsonObject {
+                        u.inputTokens?.let { put("inputTokens", it) }
+                        u.outputTokens?.let { put("outputTokens", it) }
+                    })
+                }
             }
             is LlmMessage.ToolResult -> buildJsonObject {
                 put("role", "toolResult")
@@ -124,6 +147,25 @@ class AgentSessionStore(
                 stopReason = runCatching {
                     com.anharness.llm.StopReason.valueOf(o["stopReason"]?.jsonPrimitive?.contentOrNull ?: "STOP")
                 }.getOrDefault(com.anharness.llm.StopReason.STOP),
+                // Pre-fix rows have no toolCalls key → empty list (same
+                // behavior as before for old data; new rows round-trip).
+                toolCalls = (o["toolCalls"] as? kotlinx.serialization.json.JsonArray)
+                    ?.mapNotNull { el ->
+                        runCatching {
+                            val c = el.jsonObject
+                            com.anharness.llm.LlmToolCall(
+                                id = c["id"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                                name = c["name"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                                arguments = c["arguments"]?.jsonObject ?: JsonObject(emptyMap()),
+                            )
+                        }.getOrNull()
+                    }.orEmpty(),
+                usage = (o["usage"] as? JsonObject)?.let { u ->
+                    com.anharness.llm.LlmUsage(
+                        inputTokens = u["inputTokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull(),
+                        outputTokens = u["outputTokens"]?.jsonPrimitive?.contentOrNull?.toIntOrNull(),
+                    )
+                },
             )
             "toolResult" -> LlmMessage.ToolResult(
                 toolCallId = o["toolCallId"]?.jsonPrimitive?.contentOrNull.orEmpty(),
