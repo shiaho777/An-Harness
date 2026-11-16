@@ -2,6 +2,13 @@ package com.anharness.llm
 
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
@@ -153,6 +160,149 @@ class StreamUsageTest {
             val done = events.filterIsInstance<LlmStreamEvent.Done>().single()
             assertEquals(StopReason.LENGTH, done.message.stopReason)
             assertEquals(4096, done.message.usage?.outputTokens)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    // ── tool-history wire shapes ([T-core-tool-history]) ───────────
+
+    private fun toolHistory() = LlmContext(
+        "sys",
+        listOf(
+            LlmMessage.User("read it"),
+            LlmMessage.Assistant(
+                "reading",
+                listOf(LlmToolCall("call_1", "file_read", buildJsonObject { put("path", "/a.txt") })),
+            ),
+            LlmMessage.ToolResult("call_1", "file_read", "content"),
+        ),
+    )
+
+    private fun requestBody(server: MockWebServer): JsonObject =
+        Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+
+    @Test
+    fun anthropicHistoryEchoesToolUseBlocks() = runTest {
+        val server = MockWebServer()
+        server.enqueue(sse("""{"type":"message_stop"}"""))
+        server.start()
+        try {
+            ModelStreamer().stream(
+                model(LlmApi.ANTHROPIC_MESSAGES, server.url("/").toString()),
+                toolHistory(), options(),
+            ).toList()
+            val messages = requestBody(server)["messages"]!!.jsonArray
+            assertEquals(3, messages.size)
+            // Assistant turn: text block first, then tool_use.
+            val assistant = messages[1].jsonObject
+            assertEquals("assistant", assistant["role"]!!.jsonPrimitive.content)
+            val blocks = assistant["content"]!!.jsonArray
+            assertEquals("text", blocks[0].jsonObject["type"]!!.jsonPrimitive.content)
+            val toolUse = blocks[1].jsonObject
+            assertEquals("tool_use", toolUse["type"]!!.jsonPrimitive.content)
+            assertEquals("call_1", toolUse["id"]!!.jsonPrimitive.content)
+            assertEquals("file_read", toolUse["name"]!!.jsonPrimitive.content)
+            assertEquals("/a.txt", toolUse["input"]!!.jsonObject["path"]!!.jsonPrimitive.content)
+            // ToolResult: user message with a tool_result block.
+            val result = messages[2].jsonObject
+            assertEquals("user", result["role"]!!.jsonPrimitive.content)
+            val rb = result["content"]!!.jsonArray[0].jsonObject
+            assertEquals("tool_result", rb["type"]!!.jsonPrimitive.content)
+            assertEquals("call_1", rb["tool_use_id"]!!.jsonPrimitive.content)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun anthropicParallelResultsMergeIntoOneUserMessage() = runTest {
+        val server = MockWebServer()
+        server.enqueue(sse("""{"type":"message_stop"}"""))
+        server.start()
+        try {
+            val ctx = LlmContext(
+                "sys",
+                listOf(
+                    LlmMessage.Assistant(
+                        "",
+                        listOf(
+                            LlmToolCall("c1", "t", JsonObject(emptyMap())),
+                            LlmToolCall("c2", "t", JsonObject(emptyMap())),
+                        ),
+                    ),
+                    LlmMessage.ToolResult("c1", "t", "r1"),
+                    LlmMessage.ToolResult("c2", "t", "r2"),
+                    LlmMessage.User("next"),
+                ),
+            )
+            ModelStreamer().stream(
+                model(LlmApi.ANTHROPIC_MESSAGES, server.url("/").toString()),
+                ctx, options(),
+            ).toList()
+            val messages = requestBody(server)["messages"]!!.jsonArray
+            // assistant + ONE merged user(tool_result x2) + user(next)
+            assertEquals(3, messages.size)
+            assertEquals(2, messages[1].jsonObject["content"]!!.jsonArray.size)
+            assertEquals("next", messages[2].jsonObject["content"]!!.jsonPrimitive.content)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun openAiHistoryEchoesToolCalls() = runTest {
+        val server = MockWebServer()
+        server.enqueue(sse("[DONE]"))
+        server.start()
+        try {
+            ModelStreamer().stream(
+                model(LlmApi.OPENAI_COMPLETIONS, server.url("/").toString()),
+                toolHistory(), options(),
+            ).toList()
+            val messages = requestBody(server)["messages"]!!.jsonArray
+            // system + user + assistant + tool
+            assertEquals(4, messages.size)
+            val assistant = messages[2].jsonObject
+            val calls = assistant["tool_calls"]!!.jsonArray
+            assertEquals(1, calls.size)
+            val call = calls[0].jsonObject
+            assertEquals("call_1", call["id"]!!.jsonPrimitive.content)
+            assertEquals("function", call["type"]!!.jsonPrimitive.content)
+            val fn = call["function"]!!.jsonObject
+            assertEquals("file_read", fn["name"]!!.jsonPrimitive.content)
+            // arguments is a JSON STRING on the wire.
+            val args = Json.parseToJsonElement(fn["arguments"]!!.jsonPrimitive.content).jsonObject
+            assertEquals("/a.txt", args["path"]!!.jsonPrimitive.content)
+            assertEquals("tool", messages[3].jsonObject["role"]!!.jsonPrimitive.content)
+            assertEquals("call_1", messages[3].jsonObject["tool_call_id"]!!.jsonPrimitive.content)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun anthropicMaxTokensMapsToLengthStop() = runTest {
+        val server = MockWebServer()
+        server.enqueue(
+            sse(
+                """{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c1","name":"shell_execute"}}""",
+                """{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"trunc"}}""",
+                """{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":4096}}""",
+                """{"type":"message_stop"}""",
+            ),
+        )
+        server.start()
+        try {
+            val events = ModelStreamer().stream(
+                model(LlmApi.ANTHROPIC_MESSAGES, server.url("/").toString()),
+                context(), options(),
+            ).toList()
+            val done = events.filterIsInstance<LlmStreamEvent.Done>().single()
+            // Truncation must surface as LENGTH so the loop fails the batch
+            // instead of executing half-streamed arguments.
+            assertEquals(StopReason.LENGTH, done.message.stopReason)
+            assertEquals(1, done.message.toolCalls.size)
         } finally {
             server.shutdown()
         }

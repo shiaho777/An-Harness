@@ -57,29 +57,70 @@ class ModelStreamer(
             put("stream", true)
             put("system", context.systemPrompt)
             putJsonArray("messages") {
+                // [T-core-tool-history] Assistant turns must echo their
+                // tool_use blocks or the next request's tool_results are
+                // orphaned (Anthropic 400: unexpected tool_use_id). Text
+                // first, tool_use last — Anthropic rejects text after
+                // tool_use in one message. Consecutive ToolResults merge
+                // into ONE user message (parallel tool batches).
+                val pendingToolResults = mutableListOf<JsonObject>()
+                fun flushToolResults() {
+                    if (pendingToolResults.isEmpty()) return
+                    add(buildJsonObject {
+                        put("role", "user")
+                        put("content", kotlinx.serialization.json.JsonArray(pendingToolResults.toList()))
+                    })
+                    pendingToolResults.clear()
+                }
                 context.messages.forEach { m ->
                     when (m) {
-                        is LlmMessage.User -> add(buildJsonObject {
-                            put("role", "user")
-                            put("content", m.text)
-                        })
-                        is LlmMessage.Assistant -> add(buildJsonObject {
-                            put("role", "assistant")
-                            put("content", m.text)
-                        })
-                        is LlmMessage.ToolResult -> add(buildJsonObject {
-                            put("role", "user")
-                            putJsonArray("content") {
+                        is LlmMessage.ToolResult -> {
+                            pendingToolResults.add(buildJsonObject {
+                                put("type", "tool_result")
+                                put("tool_use_id", m.toolCallId)
+                                put("content", m.text)
+                                if (m.isError) put("is_error", true)
+                            })
+                        }
+                        is LlmMessage.User -> {
+                            flushToolResults()
+                            add(buildJsonObject {
+                                put("role", "user")
+                                put("content", m.text)
+                            })
+                        }
+                        is LlmMessage.Assistant -> {
+                            flushToolResults()
+                            if (m.toolCalls.isEmpty()) {
                                 add(buildJsonObject {
-                                    put("type", "tool_result")
-                                    put("tool_use_id", m.toolCallId)
+                                    put("role", "assistant")
                                     put("content", m.text)
-                                    if (m.isError) put("is_error", true)
+                                })
+                            } else {
+                                add(buildJsonObject {
+                                    put("role", "assistant")
+                                    putJsonArray("content") {
+                                        if (m.text.isNotEmpty()) {
+                                            add(buildJsonObject {
+                                                put("type", "text")
+                                                put("text", m.text)
+                                            })
+                                        }
+                                        m.toolCalls.forEach { call ->
+                                            add(buildJsonObject {
+                                                put("type", "tool_use")
+                                                put("id", call.id)
+                                                put("name", call.name)
+                                                put("input", call.arguments)
+                                            })
+                                        }
+                                    }
                                 })
                             }
-                        })
+                        }
                     }
                 }
+                flushToolResults()
             }
             if (context.tools.isNotEmpty()) {
                 putJsonArray("tools") {
@@ -110,6 +151,10 @@ class ModelStreamer(
         // cache counters), message_delta carries the final output_tokens.
         var inputTokens: Int? = null
         var outputTokens: Int? = null
+        // [T-core-stop-reason] stop_reason rides on message_delta; without
+        // it a max_tokens truncation looked like STOP and the loop executed
+        // tool calls with half-streamed arguments.
+        var stopReason: StopReason = StopReason.STOP
 
         val factory = EventSources.createFactory(client)
         val listener = object : EventSourceListener() {
@@ -131,6 +176,10 @@ class ModelStreamer(
                         "message_delta" -> {
                             val usage = evt["usage"]?.jsonObject
                             usage?.get("output_tokens")?.jsonPrimitive?.intOrNull?.let { outputTokens = it }
+                            when (evt["delta"]?.jsonObject?.get("stop_reason")?.jsonPrimitive?.contentOrNull) {
+                                "max_tokens" -> stopReason = StopReason.LENGTH
+                                "refusal" -> stopReason = StopReason.ERROR
+                            }
                         }
                         "content_block_delta" -> {
                             val delta = evt["delta"]?.jsonObject ?: return
@@ -168,7 +217,7 @@ class ModelStreamer(
                             val usage = if (inputTokens != null || outputTokens != null) {
                                 LlmUsage(inputTokens = inputTokens, outputTokens = outputTokens)
                             } else null
-                            trySend(LlmStreamEvent.Done(LlmMessage.Assistant(text.toString(), calls, StopReason.STOP, usage)))
+                            trySend(LlmStreamEvent.Done(LlmMessage.Assistant(text.toString(), calls, stopReason, usage)))
                             close()
                         }
                         "error" -> {
@@ -216,6 +265,23 @@ class ModelStreamer(
                         is LlmMessage.Assistant -> add(buildJsonObject {
                             put("role", "assistant")
                             put("content", m.text)
+                            // [T-core-tool-history] Echo tool_calls or the
+                            // following role=tool messages are orphaned and
+                            // the endpoint 400s ("tool_call_id not found").
+                            if (m.toolCalls.isNotEmpty()) {
+                                putJsonArray("tool_calls") {
+                                    m.toolCalls.forEach { call ->
+                                        add(buildJsonObject {
+                                            put("id", call.id)
+                                            put("type", "function")
+                                            put("function", buildJsonObject {
+                                                put("name", call.name)
+                                                put("arguments", json.encodeToString(JsonObject.serializer(), call.arguments))
+                                            })
+                                        })
+                                    }
+                                }
+                            }
                         })
                         is LlmMessage.ToolResult -> add(buildJsonObject {
                             put("role", "tool")
