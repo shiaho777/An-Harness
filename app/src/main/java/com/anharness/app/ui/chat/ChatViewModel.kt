@@ -1858,6 +1858,12 @@ class ChatViewModel(
             title = "Harness",
             subtitle = "",
         ),
+        SlashCommand(
+            id = "subagent",
+            icon = Icons.Default.Hub,
+            title = "Subagent",
+            subtitle = "",
+        ),
     )
 
     // [T-android-split-chat] filteredSlashCommands / updateSlashMenuState /
@@ -2108,10 +2114,74 @@ class ChatViewModel(
         when (cmd.id) {
             "plan" -> executePlanWithArgs(args)
             "mode" -> executeModeWithArgs(args)
+            "subagent" -> executeSubagentWithArgs(args)
             else -> executeSlashCommand(cmd)
         }
         return true
     }
+
+    /**
+     * [T-subagent-app-wiring] `/subagent <task>` delegates a bounded sub-task
+     * to a fresh sub-agent running on the CURRENT provider (via
+     * ProviderStreamAdapter), then posts the result + lineage back into the
+     * chat. Bare `/subagent` shows the lineage of recent spawns.
+     *
+     * The child inherits the session's file tools and the loop guard; the
+     * core SubAgentRunner enforces depth/concurrency caps and tighten-only
+     * permission gates. Runs off the main thread; never blocks the composer.
+     */
+    private fun executeSubagentWithArgs(args: String) {
+        val registry = subAgentRegistry
+        if (args.isBlank()) {
+            val nodes = registry.all()
+            if (nodes.isEmpty()) {
+                appendSystemInfo("No sub-agents yet. Use /subagent <task> to delegate one.", "subagent")
+            } else {
+                val tree = nodes.joinToString("\n") { n ->
+                    val indent = "  ".repeat((n.depth - 1).coerceAtLeast(0))
+                    val status = when (n.ok) { null -> "running"; true -> "done"; false -> "failed" }
+                    "$indent• [d${n.depth}] ${n.task.take(60)} — $status"
+                }
+                appendSystemInfo("Sub-agent lineage:\n$tree", "subagent")
+            }
+            return
+        }
+        val provider = currentProvider
+        if (provider == null) {
+            appendSystemInfo("Configure a model first, then /subagent <task>.", "subagent")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            appendSystemInfo("Delegating to sub-agent: \"${args.take(80)}\"…", "subagent")
+            val sid = runCatching { ensureSession() }.getOrNull()
+            val session = com.anharness.agent.AgentSession(
+                systemPrompt = buildSystemPrompt() ?: "You are a helpful sub-agent.",
+                tools = com.anharness.app.harness.HarnessBridge.fileTools(context) { sid ?: activeSessionId },
+            )
+            val config = com.anharness.agent.AgentLoopConfig(
+                model = com.anharness.app.harness.ProviderStreamAdapter.descriptor(provider),
+                apiKey = "",
+                beforeToolCall = { subAgentGuard.before(it) },
+                afterToolCall = { subAgentGuard.after(it) },
+            )
+            val runner = com.anharness.agent.SubAgentRunner(
+                streamFn = com.anharness.app.harness.ProviderStreamAdapter.streamFn(provider),
+                registry = registry,
+                parentId = sid,
+            )
+            val result = runner.spawn(
+                com.anharness.agent.SubAgentTask(task = args),
+                session,
+                config,
+            )
+            val header = if (result.isError) "Sub-agent failed:" else "Sub-agent result:"
+            appendSystemInfo("$header\n${result.text}", "subagent")
+        }
+    }
+
+    /** Shared lineage registry + loop guard for /subagent spawns this session. */
+    private val subAgentRegistry = com.anharness.agent.SubAgentRegistry()
+    private val subAgentGuard = com.anharness.app.harness.HarnessBridge.LoopGuard()
 
     /**
      * [T-android-plan-mode] dsh plan-mode command parity:
