@@ -61,6 +61,34 @@ internal object OffloadGate {
         request: NativeOffloadRequest? = null,
     ): NativeOffloadResult? {
         if (allow(toolName, displayName, request?.sessionId)) return null
+        return denied(displayName, args)
+    }
+
+    /**
+     * [T-scheduled-force-approval] Mandatory per-call card — no preset,
+     * session grant, or session denial can skip it (see
+     * [OffloadPermissionManager.enforceAlwaysAsk]). For scheduled-task
+     * mutations: each create/delete/enable/disable/run commits the agent
+     * to future autonomous runs, so the user approves every single one.
+     */
+    fun enforceAlwaysAsk(
+        toolName: String,
+        displayName: String,
+        args: OffloadArgs,
+        request: NativeOffloadRequest? = null,
+    ): NativeOffloadResult? {
+        val allowed = runBlocking {
+            OffloadPermissionManager.enforceAlwaysAsk(
+                toolName,
+                displayName,
+                request?.sessionId ?: OffloadPermissionManager.OFFLOAD_GLOBAL_SESSION_ID,
+            )
+        }
+        if (allowed) return null
+        return denied(displayName, args)
+    }
+
+    private fun denied(displayName: String, args: OffloadArgs): NativeOffloadResult {
         val body = JSONObject()
             .put("error", "permission_denied")
             .put("message",

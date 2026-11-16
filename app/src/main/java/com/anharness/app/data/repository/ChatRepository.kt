@@ -6,6 +6,7 @@ import com.anharness.app.data.db.ChatSessionEntity
 import com.anharness.app.data.db.FolderEntity
 import com.anharness.app.data.db.MessageEntity
 import com.anharness.app.data.model.ModelAttributionSnapshot
+import com.anharness.app.offload.OffloadPermissionManager
 import kotlinx.coroutines.flow.Flow
 import java.util.UUID
 
@@ -109,6 +110,9 @@ class ChatRepository(internal val dao: ChatDao) {
     suspend fun deleteSession(id: String) {
         dao.deleteMessages(id)
         dao.deleteSession(id)
+        // [T-scheduled-force-approval] Session-scoped tool grants/denials
+        // die with the session — clearSessionGrants had no caller before.
+        OffloadPermissionManager.clearSessionGrants(id)
     }
 
     // ─── Session groups ("folders") ────────────────────────────────────────

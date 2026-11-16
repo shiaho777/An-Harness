@@ -78,6 +78,16 @@ fun OffloadPermissionDialog() {
                     req.description,
                     style = MaterialTheme.typography.bodyMedium,
                 )
+                // [T-scheduled-force-approval] Mandatory per-call card:
+                // explain that no preset can skip this approval.
+                if (req.forceAsk) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        stringResource(R.string.offload_perm_force_ask_note),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         },
         confirmButton = {
@@ -87,12 +97,16 @@ fun OffloadPermissionDialog() {
                     .padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                // Allow in this session — happy path goes first.
-                MinisButton(
-                    onClick = { OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.ALLOW_SESSION) },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(stringResource(R.string.offload_perm_allow_session))
+                // Allow in this session — happy path goes first. Hidden on
+                // force-ask cards: every call must be approved on its own
+                // (the manager demotes it anyway; hiding avoids the lie).
+                if (!req.forceAsk) {
+                    MinisButton(
+                        onClick = { OffloadPermissionManager.respondToRequest(OffloadPermissionManager.Response.ALLOW_SESSION) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(stringResource(R.string.offload_perm_allow_session))
+                    }
                 }
                 // Allow once — no caching; next call re-prompts.
                 MinisOutlinedButton(
