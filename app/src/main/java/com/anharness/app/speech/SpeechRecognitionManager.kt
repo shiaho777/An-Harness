@@ -3,8 +3,11 @@ package com.anharness.app.speech
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.Locale
 
@@ -61,6 +64,15 @@ object SpeechRecognitionManager {
 
     private val _recognizedText = MutableStateFlow("")
     val recognizedText: StateFlow<String> = _recognizedText.asStateFlow()
+
+    /**
+     * [T-voice-call-duplex] One emit per VAD speech-start. The voice-call
+     * orchestrator collects this to barge-in (stop reply TTS) the instant
+     * the user talks over a spoken reply. ExtraBufferCapacity so a slow
+     * collector never drops a barge-in signal.
+     */
+    private val _speechStartEvents = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
+    val speechStartEvents: SharedFlow<Unit> = _speechStartEvents.asSharedFlow()
 
     private val _locale = MutableStateFlow(Locale.getDefault())
     val locale: StateFlow<Locale> = _locale.asStateFlow()
@@ -370,6 +382,10 @@ object SpeechRecognitionManager {
             }
 
             override fun onRmsDb(rms: Float) { pushLevel(rms) }
+
+            override fun onSpeechStarted() {
+                _speechStartEvents.tryEmit(Unit)
+            }
         }
 
         try {

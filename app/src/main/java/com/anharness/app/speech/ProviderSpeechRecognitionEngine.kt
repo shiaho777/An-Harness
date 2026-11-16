@@ -315,6 +315,7 @@ class ProviderSpeechRecognitionEngine(private val appContext: Context) : SpeechR
             object : VoiceActivityListener {
                 override fun onVoiceStart() {
                     Log.i(TAG, "[vad] speech start")
+                    listener.onSpeechStarted()
                 }
 
                 override fun onLevel(level: Float) {

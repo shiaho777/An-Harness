@@ -334,8 +334,32 @@ class VoiceActivityDetector(
         }
         recorder = rec
 
+        // [T-voice-call-duplex] Acoustic echo cancellation so the reply TTS
+        // playing out loud doesn't trip the VAD as "user speech" during a
+        // hands-free call. Best-effort: many ROMs expose no AEC on the
+        // VOICE_RECOGNITION source, in which case we degrade silently (the
+        // call orchestrator's stop-on-barge-in still keeps things sane).
+        attachEchoCanceler(rec.audioSessionId)
+
         captureJob = scope.launch { captureLoop(rec) }
         return null
+    }
+
+    private var echoCanceler: android.media.audiofx.AcousticEchoCanceler? = null
+
+    private fun attachEchoCanceler(sessionId: Int) {
+        runCatching {
+            if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                echoCanceler = android.media.audiofx.AcousticEchoCanceler.create(sessionId)?.apply {
+                    enabled = true
+                }
+            }
+        }.onFailure { Log.w(TAG, "AEC unavailable: ${it.message}") }
+    }
+
+    private fun releaseEchoCanceler() {
+        runCatching { echoCanceler?.release() }
+        echoCanceler = null
     }
 
     private fun applyThresholds(w: VADWrapper) {
@@ -583,6 +607,7 @@ class VoiceActivityDetector(
         backgroundedAtMs = 0
         captureJob?.let { runCatching { it.cancel() } }
         captureJob = null
+        releaseEchoCanceler()
         recorder = null
         // Null the reference and free the native object under the same lock the
         // capture thread holds while inside processAudio, so release() waits for

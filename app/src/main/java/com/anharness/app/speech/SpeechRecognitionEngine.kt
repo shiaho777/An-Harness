@@ -96,6 +96,13 @@ interface SpeechRecognitionEngine {
 
         /** Fires when the engine starts actually listening (after warmup). */
         fun onReadyForSpeech() {}
+
+        /**
+         * [T-voice-call-duplex] Fires when the VAD detects the user STARTING
+         * to speak (before any transcript). Drives barge-in in voice-call
+         * mode. Default no-op so engines without VAD are unaffected.
+         */
+        fun onSpeechStarted() {}
     }
 }
 

@@ -6308,6 +6308,14 @@ fun ChatScreen(
                             DisposableEffect(replyTts) {
                                 onDispose { replyTts.shutdown() }
                             }
+                            // [T-voice-call-duplex] Hands-free call orchestrator:
+                            // barge-in + auto-send + auto re-arm. Inert unless
+                            // the user enables call mode in the voice panel.
+                            com.anharness.app.ui.chat.voice.VoiceCallOrchestrator(
+                                viewModel = viewModel,
+                                replyTts = replyTts,
+                                ensureMicPermission = { ensureMicPermissionFlow() },
+                            )
                             // [T-android-read-replies-pill-metrics] Sizing mirrors
                             // iOS readAloudToolbarToggle: 10/6 padding around a
                             // 5pt-spaced icon+label, on a capsule that HUGS its

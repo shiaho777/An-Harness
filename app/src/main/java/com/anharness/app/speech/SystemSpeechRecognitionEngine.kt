@@ -317,6 +317,7 @@ class SystemSpeechRecognitionEngine(private val appContext: Context) : SpeechRec
                     speechStartedAt = System.currentTimeMillis()
                     heardSpeech = true
                     Log.i(TAG, "[vad] speech start")
+                    listener?.onSpeechStarted()
                 }
 
                 override fun onLevel(level: Float) {
