@@ -24,9 +24,11 @@ import com.anharness.llm.stringArg
  *    uncompacted) — silently degrading to a sliding window would hide the
  *    failure.
  *
- * Token accounting: v0.2 uses the chars/4 heuristic for every message. Pi
- * additionally anchors on the last assistant usage block; LlmMessage carries
- * no usage, so that anchor lands when usage tracking reaches core:llm.
+ * Token accounting: chars/4 heuristic per message, anchored on the last
+ * assistant usage block when the provider reported one (pi parity) — see
+ * [estimateContextTokensAnchored]. Cut-point selection stays heuristic:
+ * it partitions relative sizes, where the anchor's absolute accuracy adds
+ * nothing.
  */
 
 interface CompactionStrategy {
@@ -78,6 +80,31 @@ fun estimateTokens(message: LlmMessage): Int {
 }
 
 fun estimateContextTokens(messages: List<LlmMessage>): Int = messages.sumOf(::estimateTokens)
+
+/**
+ * Usage-anchored context estimate (pi parity). chars/4 systematically
+ * undercounts CJK (~1 token/char vs 0.25 assumed) and dense code, so a
+ * Chinese-heavy conversation could sail past the real window without ever
+ * tripping [shouldCompact]. When the provider reported usage on an
+ * assistant message, that count is ground truth for everything up to and
+ * including that call: anchor on inputTokens + outputTokens of the LAST
+ * such message, then add heuristic estimates only for the delta after it.
+ * No anchor → plain [estimateContextTokens] (unchanged behavior).
+ *
+ * Note: inputTokens covers system prompt + tools too, which the heuristic
+ * ignores entirely — anchoring is strictly more accurate, never less.
+ */
+fun estimateContextTokensAnchored(messages: List<LlmMessage>): Int {
+    val anchorIndex = messages.indexOfLast {
+        it is LlmMessage.Assistant && it.usage?.inputTokens != null
+    }
+    if (anchorIndex < 0) return estimateContextTokens(messages)
+    val anchor = messages[anchorIndex] as LlmMessage.Assistant
+    val usage = anchor.usage!!
+    val anchored = (usage.inputTokens ?: 0) + (usage.outputTokens ?: 0)
+    val delta = messages.subList(anchorIndex + 1, messages.size).sumOf(::estimateTokens)
+    return anchored + delta
+}
 
 fun shouldCompact(contextTokens: Int, contextWindow: Int, settings: CompactionSettings): Boolean =
     settings.enabled && contextTokens > contextWindow - settings.reserveTokens
@@ -415,7 +442,7 @@ class LlmSummarizingCompaction(
 ) : CompactionStrategy {
     override suspend fun compact(messages: List<LlmMessage>): List<LlmMessage> {
         val settings = settingsSource.get()
-        if (!shouldCompact(estimateContextTokens(messages), contextWindow.get(), settings)) return messages
+        if (!shouldCompact(estimateContextTokensAnchored(messages), contextWindow.get(), settings)) return messages
         val preparation = prepareCompaction(messages, settings) ?: return messages
         val summary = generateSummary(
             preparation,

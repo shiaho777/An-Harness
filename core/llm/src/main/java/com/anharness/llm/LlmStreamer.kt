@@ -106,6 +106,10 @@ class ModelStreamer(
         val toolArgs = mutableMapOf<String, StringBuilder>()
         val toolNames = mutableMapOf<String, String>()
         val toolOrder = mutableListOf<String>()
+        // Usage arrives split: message_start carries input_tokens (plus
+        // cache counters), message_delta carries the final output_tokens.
+        var inputTokens: Int? = null
+        var outputTokens: Int? = null
 
         val factory = EventSources.createFactory(client)
         val listener = object : EventSourceListener() {
@@ -113,6 +117,21 @@ class ModelStreamer(
                 try {
                     val evt = json.parseToJsonElement(data).jsonObject
                     when (evt["type"]?.jsonPrimitive?.contentOrNull) {
+                        "message_start" -> {
+                            val usage = evt["message"]?.jsonObject?.get("usage")?.jsonObject
+                            if (usage != null) {
+                                // Full prompt size = uncached + cache-write + cache-read.
+                                val uncached = usage["input_tokens"]?.jsonPrimitive?.intOrNull ?: 0
+                                val cacheWrite = usage["cache_creation_input_tokens"]?.jsonPrimitive?.intOrNull ?: 0
+                                val cacheRead = usage["cache_read_input_tokens"]?.jsonPrimitive?.intOrNull ?: 0
+                                inputTokens = uncached + cacheWrite + cacheRead
+                                outputTokens = usage["output_tokens"]?.jsonPrimitive?.intOrNull ?: outputTokens
+                            }
+                        }
+                        "message_delta" -> {
+                            val usage = evt["usage"]?.jsonObject
+                            usage?.get("output_tokens")?.jsonPrimitive?.intOrNull?.let { outputTokens = it }
+                        }
                         "content_block_delta" -> {
                             val delta = evt["delta"]?.jsonObject ?: return
                             when (delta["type"]?.jsonPrimitive?.contentOrNull) {
@@ -146,7 +165,10 @@ class ModelStreamer(
                                     .getOrDefault(JsonObject(emptyMap()))
                                 LlmToolCall(idKey, toolNames[idKey].orEmpty(), args)
                             }
-                            trySend(LlmStreamEvent.Done(LlmMessage.Assistant(text.toString(), calls, StopReason.STOP)))
+                            val usage = if (inputTokens != null || outputTokens != null) {
+                                LlmUsage(inputTokens = inputTokens, outputTokens = outputTokens)
+                            } else null
+                            trySend(LlmStreamEvent.Done(LlmMessage.Assistant(text.toString(), calls, StopReason.STOP, usage)))
                             close()
                         }
                         "error" -> {
@@ -176,6 +198,10 @@ class ModelStreamer(
         val body = buildJsonObject {
             put("model", model.id)
             put("stream", true)
+            // Ask for a final usage chunk (OpenAI + most compatible gateways).
+            // Gateways that don't know the option ignore it; usage stays null
+            // and consumers fall back to estimation.
+            put("stream_options", buildJsonObject { put("include_usage", true) })
             putJsonArray("messages") {
                 add(buildJsonObject {
                     put("role", "system")
@@ -226,6 +252,7 @@ class ModelStreamer(
         val toolArgs = mutableMapOf<String, StringBuilder>()
         val toolNames = mutableMapOf<String, String>()
         var finishReason: String? = null
+        var usage: LlmUsage? = null
 
         val factory = EventSources.createFactory(client)
         val listener = object : EventSourceListener() {
@@ -238,12 +265,18 @@ class ModelStreamer(
                         LlmToolCall(callId, toolNames[callId].orEmpty(), args)
                     }
                     val stop = if (finishReason == "length") StopReason.LENGTH else StopReason.STOP
-                    trySend(LlmStreamEvent.Done(LlmMessage.Assistant(text.toString(), calls, stop)))
+                    trySend(LlmStreamEvent.Done(LlmMessage.Assistant(text.toString(), calls, stop, usage)))
                     close()
                     return
                 }
                 try {
                     val chunk = json.parseToJsonElement(data).jsonObject
+                    // include_usage: the final chunk has empty choices + usage.
+                    (chunk["usage"] as? JsonObject)?.let { u ->
+                        val input = u["prompt_tokens"]?.jsonPrimitive?.intOrNull
+                        val output = u["completion_tokens"]?.jsonPrimitive?.intOrNull
+                        if (input != null || output != null) usage = LlmUsage(input, output)
+                    }
                     val choice = chunk["choices"]?.jsonArray?.firstOrNull()?.jsonObject ?: return
                     finishReason = choice["finish_reason"]?.let {
                         (it as? JsonPrimitive)?.contentOrNull

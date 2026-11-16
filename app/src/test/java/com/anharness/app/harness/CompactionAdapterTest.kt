@@ -143,4 +143,52 @@ class CompactionAdapterTest {
         val summary = CompactionAdapter.summarizeAll(messages, null, ThrowingProvider())
         assertNull(summary) // graceful degradation
     }
+
+    // ── usage anchor injection ─────────────────────────────────────
+
+    @Test
+    fun withUsageAnchorStampsLastAssistantOnly() {
+        val core = listOf(
+            LlmMessage.User("q1"),
+            LlmMessage.Assistant("a1"),
+            LlmMessage.User("q2"),
+            LlmMessage.Assistant("a2"),
+            LlmMessage.ToolResult("id", "file_read", "content"),
+        )
+        val anchored = CompactionAdapter.withUsageAnchor(core, latestContextTokens = 12_000)
+        assertNull((anchored[1] as LlmMessage.Assistant).usage)
+        assertEquals(12_000, (anchored[3] as LlmMessage.Assistant).usage?.inputTokens)
+        // Original list untouched (no shared mutation).
+        assertNull((core[3] as LlmMessage.Assistant).usage)
+        // Anchored estimate now dominates the heuristic.
+        assertEquals(
+            12_000 + com.anharness.agent.estimateTokens(core[4]),
+            com.anharness.agent.estimateContextTokensAnchored(anchored),
+        )
+    }
+
+    @Test
+    fun withUsageAnchorNoopOnMissingOrNonPositiveCount() {
+        val core = listOf(LlmMessage.User("q"), LlmMessage.Assistant("a"))
+        assertSame(core, CompactionAdapter.withUsageAnchor(core, null))
+        assertSame(core, CompactionAdapter.withUsageAnchor(core, 0))
+        assertSame(core, CompactionAdapter.withUsageAnchor(core, -5))
+        // No assistant message → nothing to stamp.
+        val usersOnly = listOf(LlmMessage.User("q"))
+        assertSame(usersOnly, CompactionAdapter.withUsageAnchor(usersOnly, 999))
+    }
+
+    @Test
+    fun summarizeAllAcceptsUsageAnchorWithoutBehaviorChange() = runTest {
+        val provider = FakeProvider()
+        val messages = listOf(
+            LLMMessage(role = LLMMessage.Role.USER, content = "问题"),
+            LLMMessage(role = LLMMessage.Role.ASSISTANT, content = "回答"),
+        )
+        val summary = CompactionAdapter.summarizeAll(
+            messages, previousSummary = null, provider = provider, latestContextTokens = 8_000,
+        )
+        assertNotNull(summary)
+        assertEquals(1, provider.calls.size)
+    }
 }

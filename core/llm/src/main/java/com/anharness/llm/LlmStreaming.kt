@@ -15,6 +15,15 @@ sealed interface LlmMessage {
         val text: String,
         val toolCalls: List<LlmToolCall> = emptyList(),
         val stopReason: StopReason = StopReason.STOP,
+        /**
+         * Provider-reported token usage for the call that produced this
+         * message, when available. [LlmUsage.inputTokens] is the FULL
+         * prompt size (system + history + tools) as counted by the API —
+         * the compaction pipeline anchors its estimate on it instead of
+         * re-guessing chars/4 over the whole history. Null = unknown;
+         * consumers must fall back to estimation, never assume zero.
+         */
+        val usage: LlmUsage? = null,
     ) : LlmMessage
     data class ToolResult(
         val toolCallId: String,
