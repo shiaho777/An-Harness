@@ -56,6 +56,10 @@ object AgentTools {
         // only the prompt section, never the request tool catalog — execution
         // outside plan mode fails in the executor.
         add(exitPlanModeDefinition())
+        // [T-subagent-app-wiring] Model-callable delegation. The executor
+        // routes through the core SubAgentRunner (depth/concurrency caps,
+        // tighten-only gates) on the live provider.
+        add(spawnSubagentDefinition())
     }.let { tools ->
         if (enabledTools == null) tools else tools.filter { it.name in enabledTools }
     }
@@ -169,5 +173,22 @@ object AgentTools {
         ),
         required = listOf("tool_title", "plan"),
         propertyOrdering = listOf("tool_title", "plan"),
+    )
+
+    // [T-subagent-app-wiring] Model-callable sub-agent delegation. Mirrors the
+    // core spawn_subagent schema; the executor (ChatViewModel) runs it through
+    // SubAgentRunner on the live provider with depth/concurrency caps.
+    fun spawnSubagentDefinition(): AgentToolDefinition = AgentToolDefinition(
+        name = "spawn_subagent",
+        description = "Delegate a bounded, self-contained sub-task to a fresh sub-agent with its own context. " +
+            "The sub-agent inherits this session's model and file tools and returns its final answer as this tool's result. " +
+            "Use for focused research/analysis that would clutter the main conversation. " +
+            "Delegation depth and concurrency are capped; do not delegate trivial single-step work.",
+        parameters = mapOf(
+            "tool_title" to AgentToolParam("string", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Research competitor pricing'). Use the same language as the user."),
+            "task" to AgentToolParam("string", "The complete, self-contained task for the sub-agent. Include all context it needs — it does not see this conversation."),
+        ),
+        required = listOf("tool_title", "task"),
+        propertyOrdering = listOf("tool_title", "task"),
     )
 }

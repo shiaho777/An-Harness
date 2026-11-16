@@ -2137,12 +2137,22 @@ class ChatViewModel(
             if (nodes.isEmpty()) {
                 appendSystemInfo("No sub-agents yet. Use /subagent <task> to delegate one.", "subagent")
             } else {
-                val tree = nodes.joinToString("\n") { n ->
-                    val indent = "  ".repeat((n.depth - 1).coerceAtLeast(0))
-                    val status = when (n.ok) { null -> "running"; true -> "done"; false -> "failed" }
-                    "$indent• [d${n.depth}] ${n.task.take(60)} — $status"
-                }
-                appendSystemInfo("Sub-agent lineage:\n$tree", "subagent")
+                // Structured payload so the info card opens a graphical tree
+                // sheet (SubAgentLineageSheet), not just plain text.
+                val payload = org.json.JSONArray().apply {
+                    nodes.forEach { n ->
+                        put(org.json.JSONObject().apply {
+                            put("id", n.id)
+                            put("parentId", n.parentId ?: org.json.JSONObject.NULL)
+                            put("depth", n.depth)
+                            put("task", n.task)
+                            put("ok", n.ok ?: org.json.JSONObject.NULL)
+                            put("startedAt", n.startedAt)
+                            put("finishedAt", n.finishedAt ?: org.json.JSONObject.NULL)
+                        })
+                    }
+                }.toString()
+                appendSystemInfo("Sub-agent lineage (${nodes.size}) — tap ⓘ for the tree", "subagent", payload)
             }
             return
         }
@@ -9603,8 +9613,53 @@ class ChatViewModel(
                 )
             }
             "exit_plan_mode" -> executeExitPlanMode(argsJson)
+            // [T-subagent-app-wiring] Model-callable delegation runs through
+            // the same SubAgentRunner path as /subagent (live provider, caps,
+            // tighten-only gates). The result returns to the loop as an
+            // ordinary tool result — batch semantics untouched.
+            "spawn_subagent" -> executeSpawnSubagentTool(argsJson)
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
+    }
+
+    /**
+     * [T-subagent-app-wiring] Executor for the model-callable spawn_subagent
+     * tool. Shares the /subagent machinery (registry + guard + provider
+     * adapter) so user-invoked and model-invoked spawns land in one lineage.
+     */
+    private suspend fun executeSpawnSubagentTool(argsJson: String): ToolExecutionResult {
+        val args = try { org.json.JSONObject(argsJson) } catch (_: Exception) {
+            return ToolExecutionResult("Error: invalid spawn_subagent arguments", false)
+        }
+        val task = args.optString("task", "")
+        val toolTitle = args.optString("tool_title", "spawn_subagent")
+        if (task.isBlank()) {
+            return ToolExecutionResult("Error: 'task' is required", false, toolTitle = toolTitle)
+        }
+        val provider = currentProvider
+            ?: return ToolExecutionResult("Error: no model configured", false, toolTitle = toolTitle)
+        val sid = runCatching { ensureSession() }.getOrNull()
+        val session = com.anharness.agent.AgentSession(
+            systemPrompt = buildSystemPrompt() ?: "You are a helpful sub-agent.",
+            tools = com.anharness.app.harness.HarnessBridge.fileTools(context) { sid ?: activeSessionId },
+        )
+        val config = com.anharness.agent.AgentLoopConfig(
+            model = com.anharness.app.harness.ProviderStreamAdapter.descriptor(provider),
+            apiKey = "",
+            beforeToolCall = { subAgentGuard.before(it) },
+            afterToolCall = { subAgentGuard.after(it) },
+        )
+        val runner = com.anharness.agent.SubAgentRunner(
+            streamFn = com.anharness.app.harness.ProviderStreamAdapter.streamFn(provider),
+            registry = subAgentRegistry,
+            parentId = sid,
+        )
+        val result = runner.spawn(com.anharness.agent.SubAgentTask(task = task), session, config)
+        return ToolExecutionResult(
+            output = result.text,
+            success = !result.isError,
+            toolTitle = toolTitle,
+        )
     }
 
     /** [P2 #16] ViewModel-owned shared state the harness executors need. */

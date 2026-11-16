@@ -40,6 +40,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.material.icons.filled.Assignment
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Schedule
@@ -536,6 +537,7 @@ internal fun FallbackInfoBlock(block: AssistantBlock, onRevert: (() -> Unit)? = 
         "memory" -> Icons.Default.Psychology
         "thinking" -> Icons.Default.Lightbulb
         "plan" -> Icons.Default.Assignment
+        "subagent" -> Icons.Default.Hub
         else -> Icons.Default.Info
     }
     // Mirrors iOS systemDividerRow: HStack { Divider, label, Divider }.
@@ -634,11 +636,20 @@ internal fun FallbackInfoBlock(block: AssistantBlock, onRevert: (() -> Unit)? = 
     }
 
     if (showDetail && hasDetail) {
-        CompactSummarySheet(
-            summary = block.toolArgs,
-            onDismiss = { showDetail = false },
-            onRevert = onRevert,
-        )
+        // [T-subagent-app-wiring] Sub-agent lineage cards open the graphical
+        // tree sheet; every other payload keeps the plain-text summary sheet.
+        if (block.toolName == "subagent") {
+            SubAgentLineageSheet(
+                payload = block.toolArgs,
+                onDismiss = { showDetail = false },
+            )
+        } else {
+            CompactSummarySheet(
+                summary = block.toolArgs,
+                onDismiss = { showDetail = false },
+                onRevert = onRevert,
+            )
+        }
     }
 }
 
