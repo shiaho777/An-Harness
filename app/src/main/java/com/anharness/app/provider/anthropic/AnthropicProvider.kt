@@ -187,6 +187,15 @@ class AnthropicProvider(
         var currentToolId: String? = null
         var currentToolName: String? = null
         val toolInputBuffer = StringBuilder()
+        // [T-anthropic-usage-merge] Usage arrives split: message_start has
+        // input/cache counters, message_delta has the final output_tokens.
+        // Parsing each event standalone made the delta Usage carry input=0,
+        // overwriting lastUsage/context pressure mid-turn. Merge across
+        // events; emit only when a field actually changed.
+        var streamInputTokens: Int? = null
+        var streamOutputTokens: Int? = null
+        var streamCacheWrite: Int? = null
+        var streamCacheRead: Int? = null
 
         try {
             var line: String?
@@ -204,7 +213,12 @@ class AnthropicProvider(
                     "message_start" -> {
                         send(LLMStreamChunk.Started)
                         event.optJSONObject("message")?.optJSONObject("usage")?.let { usage ->
-                            send(LLMStreamChunk.Usage(parseUsage(usage)))
+                            val u = parseUsage(usage)
+                            streamInputTokens = u.inputTokens
+                            streamCacheWrite = u.cacheCreationInputTokens
+                            streamCacheRead = u.cacheReadInputTokens
+                            if (u.outputTokens > 0) streamOutputTokens = u.outputTokens
+                            send(LLMStreamChunk.Usage(u))
                         }
                     }
                     "content_block_start" -> {
@@ -254,7 +268,27 @@ class AnthropicProvider(
                     }
                     "message_delta" -> {
                         event.optJSONObject("usage")?.let { usage ->
-                            send(LLMStreamChunk.Usage(parseUsage(usage)))
+                            val u = parseUsage(usage)
+                            // input_tokens on the delta is usually absent/0 —
+                            // keep the message_start value (full prompt).
+                            if (u.inputTokens > 0) {
+                                streamInputTokens = u.inputTokens
+                                streamCacheWrite = u.cacheCreationInputTokens
+                                streamCacheRead = u.cacheReadInputTokens
+                            }
+                            if (u.outputTokens > 0) streamOutputTokens = u.outputTokens
+                            val fullInput = streamInputTokens ?: 0
+                            send(
+                                LLMStreamChunk.Usage(
+                                    LLMUsage(
+                                        inputTokens = fullInput,
+                                        outputTokens = streamOutputTokens ?: 0,
+                                        cacheCreationInputTokens = streamCacheWrite,
+                                        cacheReadInputTokens = streamCacheRead,
+                                        latestContextTokens = fullInput,
+                                    ),
+                                ),
+                            )
                         }
                         val stopReason = event.optJSONObject("delta")
                             ?.safeOptString("stop_reason", "")?.ifEmpty { null }
