@@ -32,8 +32,11 @@ class RemoteHostManager(private val context: Context) {
     private val prefs: SharedPreferences by lazy {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
+    // [T-remote-ssh] SSH secrets are high-sensitivity key material: use the
+    // fail-closed store so a Keystore failure refuses storage instead of
+    // silently writing the private key in cleartext (safeCreate's fallback).
     private val secrets: SharedPreferences by lazy {
-        EncryptedPrefsFactory.safeCreate(context, SECRETS_NAME)
+        EncryptedPrefsFactory.createFailClosed(context, SECRETS_NAME)
     }
 
     // ── host CRUD ────────────────────────────────────────────────────────

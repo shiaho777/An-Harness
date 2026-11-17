@@ -36,6 +36,30 @@ import java.security.KeyStore
 object EncryptedPrefsFactory {
     private const val TAG = "EncryptedPrefsFactory"
 
+    /**
+     * [T-remote-ssh] Fail-closed variant for HIGH-SENSITIVITY key material
+     * (SSH private keys / passwords). Unlike [safeCreate], this NEVER falls
+     * back to plain text: if the encrypted store cannot be created or
+     * rebuilt, it throws so the caller refuses to store the secret at all.
+     * Silently writing a private key to disk in cleartext is worse than
+     * telling the user "secure storage unavailable, re-enter later".
+     *
+     * The wipe-and-retry step is kept (it recovers a corrupted keyset), but
+     * the final plain-text escape hatch is removed.
+     */
+    fun createFailClosed(context: Context, fileName: String): SharedPreferences {
+        runCatching { return build(context, fileName) }
+            .onFailure { Log.w(TAG, "fail-closed create($fileName) failed: ${it.message}") }
+        wipeEncryptedState(context, fileName)
+        return runCatching { build(context, fileName) }.getOrElse {
+            Log.e(TAG, "fail-closed rebuild($fileName) failed — refusing plain-text fallback", it)
+            throw IllegalStateException(
+                "Secure storage unavailable for $fileName; secret was NOT stored.",
+                it,
+            )
+        }
+    }
+
     fun safeCreate(context: Context, fileName: String): SharedPreferences {
         runCatching { return build(context, fileName) }
             .onFailure { Log.w(TAG, "first create($fileName) failed: ${it.message}") }
