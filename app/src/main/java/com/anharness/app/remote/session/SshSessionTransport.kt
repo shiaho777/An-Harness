@@ -98,6 +98,8 @@ class SshSessionTransport(
     }
 
     companion object {
-        const val DEFAULT_SERVER_COMMAND = "minis-session-server"
+        // Absolute path: ssh exec uses a non-login shell whose PATH does
+        // not include ~/.minis/bin. `minis-remote deploy` installs here.
+        const val DEFAULT_SERVER_COMMAND = "\$HOME/.minis/bin/minis-session-server"
     }
 }
