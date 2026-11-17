@@ -1864,6 +1864,12 @@ class ChatViewModel(
             title = "Subagent",
             subtitle = "",
         ),
+        SlashCommand(
+            id = "remote",
+            icon = Icons.Default.Hub,
+            title = "Remote",
+            subtitle = "",
+        ),
     )
 
     // [T-android-split-chat] filteredSlashCommands / updateSlashMenuState /
@@ -2115,9 +2121,61 @@ class ChatViewModel(
             "plan" -> executePlanWithArgs(args)
             "mode" -> executeModeWithArgs(args)
             "subagent" -> executeSubagentWithArgs(args)
+            "remote" -> executeRemoteWithArgs(args)
             else -> executeSlashCommand(cmd)
         }
         return true
+    }
+
+    /**
+     * [T-remote-backend] `/remote` manages this session's execution backend:
+     *  - bare `/remote`        → show current binding + host list
+     *  - `/remote <hostId>`    → bind shell_execute to that remote host
+     *  - `/remote off|local`   → unbind (back to local sandbox)
+     *
+     * Binding changes WHERE shell commands run, never WHETHER they need
+     * approval — every remote command still passes RemoteShellTool's
+     * mandatory per-call card. File/browser/phone tools always stay local.
+     */
+    private fun executeRemoteWithArgs(args: String) {
+        val manager = com.anharness.app.remote.RemoteHostManager(context)
+        val sid = activeSessionId
+        val trimmed = args.trim()
+        when {
+            trimmed.isEmpty() -> {
+                val bound = remoteBindings.boundHost(sid)
+                val hosts = manager.list()
+                val boundLabel = bound?.let { id -> manager.get(id)?.label ?: id }
+                val list = if (hosts.isEmpty()) "  (none — add via minis-remote add)"
+                else hosts.joinToString("\n") { "  • ${it.id}  ${it.label} (${it.username}@${it.hostname})" }
+                appendSystemInfo(
+                    "Execution backend: " + (boundLabel?.let { "REMOTE ($it)" } ?: "LOCAL") +
+                        "\nHosts:\n$list\nBind with /remote <hostId>, unbind with /remote off.",
+                    "remote",
+                )
+            }
+            trimmed.equals("off", true) || trimmed.equals("local", true) -> {
+                remoteBindings.unbind(sid)
+                appendSystemInfo("Execution backend set to LOCAL (phone sandbox).", "remote")
+            }
+            else -> {
+                val host = manager.get(trimmed)
+                if (host == null) {
+                    appendSystemInfo("No remote host with id '$trimmed'. Use /remote to list hosts.", "remote")
+                    return
+                }
+                if (manager.loadSecret(host.id) == null) {
+                    appendSystemInfo("Host '${host.label}' has no stored credential; cannot bind.", "remote")
+                    return
+                }
+                remoteBindings.bind(sid, host.id)
+                appendSystemInfo(
+                    "Execution backend set to REMOTE: ${host.label} (${host.username}@${host.hostname}). " +
+                        "shell_execute now runs there; each command still needs your approval.",
+                    "remote",
+                )
+            }
+        }
     }
 
     /**
@@ -2192,6 +2250,9 @@ class ChatViewModel(
     /** Shared lineage registry + loop guard for /subagent spawns this session. */
     private val subAgentRegistry = com.anharness.agent.SubAgentRegistry()
     private val subAgentGuard = com.anharness.app.harness.HarnessBridge.LoopGuard()
+
+    /** [T-remote-backend] Per-session remote-host binding for shell routing. */
+    private val remoteBindings = com.anharness.app.remote.ExecutionBackend.Bindings(context)
 
     /**
      * [T-android-plan-mode] dsh plan-mode command parity:
@@ -9549,30 +9610,26 @@ class ChatViewModel(
             // executors (ExecutorTools) when the pilot flag is on — same
             // bodies, new home. Legacy inline executors remain as fallback
             // for a harness-layer failure; behavior is otherwise identical.
-            "shell_execute" -> executeViaHarness(
-                fallback = { executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText) },
-            ) {
-                com.anharness.app.harness.HarnessBridge.executePilotTool(
-                    name = "shell_execute",
-                    toolCallId = toolId,
-                    argsJson = argsJson,
-                    context = context,
-                    sessionId = { activeSessionId },
-                    deps = harnessExecutorDeps(),
-                    onShellLine = { line ->
-                        val idx = toolBlocks.indexOfFirst { it.id == toolId }
-                        if (idx >= 0) {
-                            val current = toolBlocks[idx].content
-                            val updated = if (current.isEmpty()) line else "$current\n$line"
-                            // Keep last 50 lines for display
-                            val trimmed = updated.lines().takeLast(50).joinToString("\n")
-                            toolBlocks[idx] = toolBlocks[idx].copy(content = trimmed)
-                            viewModelScope.launch(Dispatchers.Main) {
-                                updateAssistantMessage(assistantId, currentText, true, toolBlocks)
-                            }
-                        }
-                    },
-                )
+            "shell_execute" -> {
+                // [T-remote-backend] If this session is bound to a remote
+                // host, run the command THERE (still via RemoteShellTool's
+                // mandatory approval card). The loop stays on the phone;
+                // only the execution backend moves. Unbound → local path.
+                val boundHost = remoteBindings.boundHost(activeSessionId)
+                if (com.anharness.app.remote.ExecutionBackend.route(boundHost, "shell_execute")
+                    == com.anharness.app.remote.ExecutionBackend.Backend.REMOTE
+                ) {
+                    val shellArgs = try { org.json.JSONObject(argsJson) } catch (_: Exception) { org.json.JSONObject() }
+                    val remoteArgs = org.json.JSONObject().apply {
+                        put("tool_title", shellArgs.optString("tool_title", "Remote shell"))
+                        put("host_id", boundHost)
+                        put("command", shellArgs.optString("command", ""))
+                        if (shellArgs.has("timeout")) put("timeout", shellArgs.optInt("timeout"))
+                    }
+                    com.anharness.app.tools.RemoteShellTool.execute(remoteArgs.toString(), activeSessionId, context)
+                } else {
+                    executeShellLocal(argsJson, toolId, toolBlocks, assistantId, currentText)
+                }
             }
             "browser_use" -> executeViaHarness(
                 fallback = { executeBrowserUseTool(argsJson) },
@@ -9624,6 +9681,43 @@ class ChatViewModel(
                 com.anharness.app.tools.RemoteShellTool.execute(argsJson, activeSessionId, context)
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
+    }
+
+    /**
+     * [T-remote-backend] The original local shell_execute path (harness pilot
+     * with legacy fallback), extracted so the remote-routing branch can
+     * delegate to it unchanged when the session is not bound to a host.
+     */
+    private suspend fun executeShellLocal(
+        argsJson: String,
+        toolId: String,
+        toolBlocks: MutableList<AssistantBlock>,
+        assistantId: String,
+        currentText: String,
+    ): ToolExecutionResult = executeViaHarness(
+        fallback = { executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText) },
+    ) {
+        com.anharness.app.harness.HarnessBridge.executePilotTool(
+            name = "shell_execute",
+            toolCallId = toolId,
+            argsJson = argsJson,
+            context = context,
+            sessionId = { activeSessionId },
+            deps = harnessExecutorDeps(),
+            onShellLine = { line ->
+                val idx = toolBlocks.indexOfFirst { it.id == toolId }
+                if (idx >= 0) {
+                    val current = toolBlocks[idx].content
+                    val updated = if (current.isEmpty()) line else "$current\n$line"
+                    // Keep last 50 lines for display
+                    val trimmed = updated.lines().takeLast(50).joinToString("\n")
+                    toolBlocks[idx] = toolBlocks[idx].copy(content = trimmed)
+                    viewModelScope.launch(Dispatchers.Main) {
+                        updateAssistantMessage(assistantId, currentText, true, toolBlocks)
+                    }
+                }
+            },
+        )
     }
 
     /**
