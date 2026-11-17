@@ -60,10 +60,20 @@ object PRootKernel {
         rootfsManager.installIfNeeded()
         rootfsManager.installProotIfNeeded()
 
-        // Overlay assets/default_mount/ onto the rootfs on every boot so
-        // updated profile scripts and URL-interception wrappers ship with
-        // each app update. Mirrors iOS RootfsManager.applyDefaultMountOverlay.
-        rootfsManager.applyDefaultMountOverlay()
+        // [T-asset-manifest] Verify the overlay assets against the committed
+        // SHA-256 manifest BEFORE applying them. Drift (corruption/tamper)
+        // must not silently execute altered agent-privileged code: on
+        // mismatch we skip the overlay and log loudly. Missing manifest
+        // (older build) degrades to the previous behavior with a warning.
+        val overlayOk = verifyOverlayManifest(context)
+        if (overlayOk) {
+            // Overlay assets/default_mount/ onto the rootfs on every boot so
+            // updated profile scripts and URL-interception wrappers ship with
+            // each app update. Mirrors iOS RootfsManager.applyDefaultMountOverlay.
+            rootfsManager.applyDefaultMountOverlay()
+        } else {
+            Log.e(TAG, "sandbox asset manifest verification FAILED — overlay skipped")
+        }
 
         // Re-apply user mirror selections — the overlay above ships stock
         // config files (pip.conf, .npmrc, repositories) and would otherwise
@@ -483,6 +493,56 @@ object PRootKernel {
             }
         }
         return null
+    }
+
+    /**
+     * [T-asset-manifest] Verify assets/default_mount against the committed
+     * sandbox-manifest.json. Returns true when the overlay is safe to apply.
+     * A missing manifest (older build) warns and allows (legacy behavior);
+     * any hash/size/presence drift returns false so altered code never runs.
+     */
+    private fun verifyOverlayManifest(context: Context): Boolean {
+        return try {
+            val am = context.assets
+            val manifestJson = runCatching {
+                am.open(AssetManifest.MANIFEST_ASSET_PATH).bufferedReader().use { it.readText() }
+            }.getOrNull()
+            if (manifestJson == null) {
+                Log.w(TAG, "sandbox-manifest.json absent — overlay unverified (legacy build)")
+                return true
+            }
+            val manifest = AssetManifest.decode(manifestJson)
+            if (manifest == null) {
+                Log.e(TAG, "sandbox-manifest.json malformed/unsupported version")
+                return false
+            }
+            val actual = mutableMapOf<String, ByteArray>()
+            fun walk(assetDir: String) {
+                val children = am.list(assetDir) ?: return
+                for (child in children) {
+                    val path = "$assetDir/$child"
+                    val sub = am.list(path)
+                    if (sub != null && sub.isNotEmpty()) walk(path)
+                    else actual[path] = am.open(path).use { it.readBytes() }
+                }
+            }
+            walk("default_mount")
+            // The manifest also pins remote/ (session server); verify those
+            // bytes too, but only the overlay subset gates the overlay.
+            val overlayExpected = AssetManifest.Manifest(
+                manifest.version, manifest.entries.filter { it.path.startsWith("default_mount/") },
+            )
+            when (val result = AssetManifest.verify(overlayExpected, actual)) {
+                AssetManifest.VerifyResult.Ok -> true
+                else -> {
+                    Log.e(TAG, "overlay manifest drift: $result")
+                    false
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "overlay verification error: ${t.message}")
+            false
+        }
     }
 
     /**
