@@ -28,6 +28,10 @@ jobs:
           # reads EOF, defaults to N, and exits 1. Disable it and accept
           # licenses ourselves non-interactively below.
           accept-android-sdk-licenses: false
+          # [T-ci-fix] The default 'tools' package was removed by Google
+          # ("Failed to find package 'tools'"); only platform-tools is
+          # needed (NDK/build-tools installed explicitly later).
+          packages: platform-tools
       - name: Accept SDK licenses (non-interactive)
         run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
       - uses: actions/setup-go@v5
@@ -73,6 +77,7 @@ jobs:
         with:
           cmdline-tools-version: 11076708
           accept-android-sdk-licenses: false
+          packages: platform-tools
       - name: Accept SDK licenses (non-interactive)
         run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
       - uses: actions/setup-go@v5
@@ -113,6 +118,7 @@ jobs:
         with:
           cmdline-tools-version: 11076708
           accept-android-sdk-licenses: false
+          packages: platform-tools
       - name: Accept SDK licenses (non-interactive)
         run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
       - name: Install NDK r28
@@ -141,6 +147,7 @@ jobs:
         with:
           cmdline-tools-version: 11076708
           accept-android-sdk-licenses: false
+          packages: platform-tools
       - name: Accept SDK licenses (non-interactive)
         run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
       - uses: actions/setup-go@v5
