@@ -15,6 +15,17 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
+        with:
+          # [T-ci-fix] Use the runner's PREINSTALLED cmdline-tools (12.0,
+          # build 11076708) instead of the action's default 16.0 download.
+          # The version mismatch triggered a reinstall whose license-
+          # acceptance step crashes on current ubuntu-24.04 images
+          # (sdkmanager exit 1). Pinning to the preinstalled build skips
+          # the download entirely.
+          cmdline-tools-version: 11076708
+          accept-android-sdk-licenses: true
+      - name: Accept SDK licenses (non-interactive)
+        run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
@@ -55,6 +66,11 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 11076708
+          accept-android-sdk-licenses: true
+      - name: Accept SDK licenses (non-interactive)
+        run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
@@ -90,6 +106,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 11076708
+          accept-android-sdk-licenses: true
+      - name: Accept SDK licenses (non-interactive)
+        run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
       - name: Install NDK r28
         run: |
           sdkmanager --install "ndk;28.2.13676358"
@@ -113,6 +134,11 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 11076708
+          accept-android-sdk-licenses: true
+      - name: Accept SDK licenses (non-interactive)
+        run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
