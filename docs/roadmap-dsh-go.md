@@ -126,3 +126,26 @@ P3 动 core 契约需完整单测；P4 涉及架构抽象放最后。
 缺 app/provider-customization.properties（21 直接报缺配置，3 个
 错误映射用例被同一初始化异常波及）。该文件含 OAuth 标识提示词，
 需项目所有者按 .example 自行填写，不代填。
+
+## P4 远程主机进度（2026-11-17）
+
+PR #19（已合并 main）落地切片 1–3：
+- 切片 1：SSH 远程执行后端（RemoteHostManager 加密存储 + TOFU +
+  remote_shell 工具 + minis-remote CLI，每次强制审批）。
+- 切片 2：SSH 密钥存储 fail-closed（createFailClosed，绝不落明文）+
+  SessionResync 断线重同步纯核心（快照+序列号折叠）。
+- 切片 3：执行后端抽象（会话绑定远程主机，shell_execute 自动路由，
+  /remote 命令；循环留手机，仅执行后端可切换）。
+
+PR #20（feat/p4-remote-session）切片 4：
+- 远程会话客户端：RemoteSessionProtocol 线协议（快照/事件帧 +
+  send/stop/resync/snapshot 请求）+ 可折叠状态模型；SessionTransport
+  可插拔接口 + RemoteSessionClient 重连客户端（复用 SessionResync，
+  小间隙增量/大间隙全量）；SshSessionTransport 跑在加密 TOFU SSH
+  exec 通道上；SshTransport.openVerifiedClient 复用验证连接。15 单测。
+
+P4 剩余：
+- 远程会话 SERVER 二进制（在主机上跑循环；客户端/协议/传输抽象已就位）。
+- Noise/WebRTC 传输后端（可选，用于免 SSH 中继；SSH 本身已强加密+
+  主机认证，故按可插拔传输抽象延后，不手写安全敏感的 Noise 栈）。
+- UI 接线：在聊天中渲染远程会话。
