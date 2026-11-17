@@ -108,6 +108,10 @@ fun ScheduledTaskEditScreen(
     var lastFiredAt by remember { mutableStateOf<Long?>(null) }
     var lastResultPreview by remember { mutableStateOf<String?>(null) }
     var lastResultSessionId by remember { mutableStateOf<String?>(null) }
+    // [T-scheduled-cli-update] Run history must survive an edit save —
+    // buildTask used to omit it, silently wiping the run records every
+    // time the user changed so much as the label.
+    var runHistory by remember { mutableStateOf<List<com.anharness.app.scheduled.ScheduledRun>>(emptyList()) }
 
     // [T-android-scheduled-tasks-full] target mode + model + date window
     var targetKind by remember { mutableStateOf(TargetKind.NEW) }
@@ -138,6 +142,7 @@ fun ScheduledTaskEditScreen(
         lastFiredAt = existing.lastFiredAt
         lastResultPreview = existing.lastResultPreview
         lastResultSessionId = existing.lastResultSessionId
+        runHistory = existing.runHistory
         startDateMs = existing.startDateMs
         endDateMs = existing.endDateMs
         when (val m = existing.targetMode) {
@@ -183,6 +188,7 @@ fun ScheduledTaskEditScreen(
         repeatMode = repeatMode, customDays = customDays, enabled = enabled,
         createdAt = createdAt, lastFiredAt = lastFiredAt,
         lastResultPreview = lastResultPreview, lastResultSessionId = lastResultSessionId,
+        runHistory = runHistory,
         targetKind = targetKind, targetSessionId = targetSessionId,
         targetMessageId = targetMessageId,
         modelBinding = modelBinding,
@@ -809,6 +815,7 @@ private fun buildTask(
     lastFiredAt: Long?,
     lastResultPreview: String?,
     lastResultSessionId: String?,
+    runHistory: List<com.anharness.app.scheduled.ScheduledRun> = emptyList(),
     targetKind: TargetKind,
     targetSessionId: String?,
     targetMessageId: String?,
@@ -856,5 +863,6 @@ private fun buildTask(
         lastFiredAt = lastFiredAt,
         lastResultPreview = lastResultPreview,
         lastResultSessionId = lastResultSessionId,
+        runHistory = runHistory,
     )
 }

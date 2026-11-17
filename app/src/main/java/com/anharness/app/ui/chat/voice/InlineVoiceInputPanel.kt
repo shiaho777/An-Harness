@@ -133,6 +133,29 @@ object VoiceModePrefs {
 
     var isVoiceActive by mutableStateOf(false)
 
+    /**
+     * [T-voice-call-duplex] Hands-free call mode: auto-send finals, barge-in
+     * over reply TTS, auto re-arm after the reply finishes. Transient like
+     * [isVoiceActive] — a call never auto-resumes on launch. Toggled from the
+     * voice panel; the orchestrator lives in ChatScreen.
+     */
+    var callMode by mutableStateOf(false)
+
+    /**
+     * [T-voice-call-duplex] Capture outcomes the panel hands to the call
+     * orchestrator while [callMode] is on: a non-blank final transcript, or
+     * an empty capture (silence/too-short/error). The orchestrator decides
+     * send vs re-arm; the panel itself does not auto-send.
+     */
+    val callCaptureEvents = kotlinx.coroutines.flow.MutableSharedFlow<CallCapture>(
+        extraBufferCapacity = 8,
+    )
+
+    sealed interface CallCapture {
+        data class Final(val text: String) : CallCapture
+        data object Empty : CallCapture
+    }
+
     private var expandedState by mutableStateOf(true)
 
     /**
@@ -349,6 +372,18 @@ fun InlineVoiceInputPanel(
             onPartialOrFinal = { text, isFinal ->
                 if (isEditing) return@startRecording
                 if (!isFinal) return@startRecording
+                // [T-voice-call-duplex] In call mode the orchestrator owns
+                // send/re-arm; hand it the raw final and keep the composer
+                // mirror in sync for display. Outside call mode, unchanged.
+                if (VoiceModePrefs.callMode) {
+                    if (text.isBlank()) {
+                        VoiceModePrefs.callCaptureEvents.tryEmit(VoiceModePrefs.CallCapture.Empty)
+                    } else {
+                        setTranscript(text)
+                        VoiceModePrefs.callCaptureEvents.tryEmit(VoiceModePrefs.CallCapture.Final(text))
+                    }
+                    return@startRecording
+                }
                 if (text.isBlank()) return@startRecording
                 val sep = if (captureBase.isEmpty() || captureBase.endsWith(" ")) "" else " "
                 val joined = captureBase + sep + text
@@ -357,10 +392,19 @@ fun InlineVoiceInputPanel(
             },
             onError = { error, message ->
                 when (error) {
-                    com.anharness.app.speech.RecognitionError.NO_MATCH -> {}
+                    com.anharness.app.speech.RecognitionError.NO_MATCH -> {
+                        if (VoiceModePrefs.callMode) {
+                            VoiceModePrefs.callCaptureEvents.tryEmit(VoiceModePrefs.CallCapture.Empty)
+                        }
+                    }
                     com.anharness.app.speech.RecognitionError.PERMISSION_DENIED ->
                         permissionDenied = true
-                    else -> transcribeError = message ?: error.name
+                    else -> {
+                        transcribeError = message ?: error.name
+                        if (VoiceModePrefs.callMode) {
+                            VoiceModePrefs.callCaptureEvents.tryEmit(VoiceModePrefs.CallCapture.Empty)
+                        }
+                    }
                 }
             },
         )
@@ -486,6 +530,21 @@ fun InlineVoiceInputPanel(
                 ),
                 modifier = Modifier.align(Alignment.TopStart),
             ) { persistExpanded(!expanded) }
+
+            // [T-voice-call-duplex] Hands-free call toggle, next to the
+            // chevron. On = auto-send finals, barge-in over reply TTS,
+            // auto re-arm. The orchestrator (ChatScreen) does the work.
+            CircleIconButton(
+                icon = if (VoiceModePrefs.callMode) Icons.Default.Close else Icons.Default.Mic,
+                contentDescription = stringResource(
+                    if (VoiceModePrefs.callMode) R.string.voice_call_end else R.string.voice_call_start,
+                ),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 40.dp),
+            ) {
+                VoiceModePrefs.callMode = !VoiceModePrefs.callMode
+            }
 
             // [T-android-voice-correction] One-time collection-consent prompt,
             // shown on the very first tap of the correction button. After the

@@ -161,6 +161,8 @@ class AgentLoop(
         val toolNameById = mutableMapOf<String, String>()
         // A "length" stop means truncated args — must survive to the caller (pi parity).
         var doneStop: StopReason? = null
+        // Provider usage rides on Done; keep it so compaction can anchor on it.
+        var doneUsage: com.anharness.llm.LlmUsage? = null
         // collect() is not inline: early stream errors unwind via carrier, not bare return.
         class StreamFailed(val assistant: LlmMessage.Assistant) : Exception()
         try {
@@ -180,6 +182,7 @@ class AgentLoop(
                         toolCalls.clear()
                         toolCalls.addAll(event.message.toolCalls)
                         doneStop = event.message.stopReason
+                        doneUsage = event.message.usage
                     }
                     is LlmStreamEvent.Error -> {
                         val msg = LlmMessage.Assistant(
@@ -210,7 +213,7 @@ class AgentLoop(
             }
         }
         val stop = doneStop ?: if (isCancelled()) StopReason.ABORTED else StopReason.STOP
-        val msg = LlmMessage.Assistant(text.toString(), toolCalls.toList(), stop)
+        val msg = LlmMessage.Assistant(text.toString(), toolCalls.toList(), stop, doneUsage)
         emit(AgentEvent.MessageEnd(msg))
         return msg
     }

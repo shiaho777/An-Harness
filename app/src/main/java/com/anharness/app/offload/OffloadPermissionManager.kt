@@ -2,6 +2,7 @@ package com.anharness.app.offload
 
 import android.content.Context
 import android.content.SharedPreferences
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,6 +30,12 @@ object OffloadPermissionManager {
         val toolTitle: String,
         val description: String,
         val sessionId: String,
+        /**
+         * [T-scheduled-force-approval] True when this card comes from
+         * [enforceAlwaysAsk]: the UI hides "Allow in this session" and
+         * maps dismiss to a one-call deny — no response may cache a grant.
+         */
+        val forceAsk: Boolean = false,
     )
 
     enum class PermissionCategory(val displayName: String) {
@@ -88,24 +95,62 @@ object OffloadPermissionManager {
         // is already authorized.
         ToolPermissionInfo("a11y_cli", "android-a11y-cli", PermissionCategory.INTEGRATIONS, PermissionLevel.NOT_ALLOWED),
         ToolPermissionInfo("shizuku_cli", "android-shizuku-cli", PermissionCategory.INTEGRATIONS, PermissionLevel.NOT_ALLOWED),
+        // [T-scheduled-force-approval] Scheduled-task mutations always go
+        // through enforceAlwaysAsk regardless of this level; ASK_ONCE is
+        // the honest default for the settings row. Hidden from Settings:
+        // the level cannot loosen the mandatory per-call card.
+        ToolPermissionInfo("scheduled_task", "Scheduled Tasks", PermissionCategory.SYSTEM, PermissionLevel.ASK_ONCE, showInSettings = false),
+        // [T-phone-safety-gate] Phone-control approval cards. ASK_ONCE +
+        // hidden: every card goes through enforceAlwaysAsk (level cannot
+        // skip it), and the hard blocks live in PhoneSafetyGate, not here.
+        ToolPermissionInfo("phone_control", "Phone Control", PermissionCategory.INTEGRATIONS, PermissionLevel.ASK_ONCE, showInSettings = false),
+        // [T-remote-ssh] Remote shell runs commands on ANOTHER machine —
+        // every call gets a mandatory approval card (enforceAlwaysAsk);
+        // the level cannot skip it. Hidden from Settings.
+        ToolPermissionInfo("remote_shell", "Remote Shell", PermissionCategory.INTEGRATIONS, PermissionLevel.ASK_ONCE, showInSettings = false),
+    )
+
+    /**
+     * [T-scheduled-force-approval] Subcommands whose approval can never be
+     * skipped — creating/modifying/deleting a scheduled task or firing one
+     * immediately all commit the agent to future autonomous runs, so each
+     * call gets its own card even under BYPASS or a prior session grant.
+     * Read-only `list` (and unknown subcommands, which fail on their own)
+     * are not mutations.
+     */
+    val scheduledMutationSubcommands: Set<String> = setOf(
+        "create", "add", "update", "edit", "delete", "remove", "rm", "enable", "disable", "run",
     )
 
     /** Stable session-id used by NativeOffloadHandlers when calling
      *  [checkPermission] from the offload IPC thread. The shell-CLI gate
      *  (T330) lives outside ChatViewModel.executeTool, so there's no
      *  per-chat-session id available to scope ASK_ONCE grants. We use
-     *  one process-lifetime grant slot instead — the user "Always Allow"
-     *  upgrades naturally to BYPASS via [respondToRequest]. */
+     *  one process-lifetime grant slot instead. T338 made responses
+     *  strictly session-scoped — "Allow in this session" caches a grant
+     *  here, never upgrades the stored level to BYPASS. */
     const val OFFLOAD_GLOBAL_SESSION_ID = "offload-global"
 
     private lateinit var prefs: SharedPreferences
+
+    /**
+     * Storage seam for [getLevel]/[setLevel]. Production always reads the
+     * SharedPreferences-backed store installed by [init]; JVM unit tests
+     * inject an in-memory map (SharedPreferences is an Android interface
+     * with no usable off-device implementation). Null → use [prefs].
+     */
+    internal var levelStoreOverride: MutableMap<String, String>? = null
 
     /** Session-scoped grants for ASK_ONCE tools. Populated by the
      *  "Allow in this session" dialog response. Cleared when the
      *  hosting session ends (or process death — see
      *  OFFLOAD_GLOBAL_SESSION_ID for offload-CLI-backed tools, which
      *  share one process-lifetime slot). */
-    private val sessionGrants = mutableMapOf<String, MutableSet<String>>() // sessionId -> set of toolNames
+    // [T-perm-concurrent-tables] Offload IPC worker threads and the UI
+    // thread hit these tables concurrently (checkPermission runs on the
+    // caller's dispatcher). Plain HashMap/HashSet under concurrent
+    // getOrPut/add can corrupt or lose updates — use concurrent sets.
+    private val sessionGrants = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>() // sessionId -> set of toolNames
 
     /** T338: session-scoped denials. Populated by the "Deny in this
      *  session" dialog response. Once a tool is in here for a given
@@ -113,13 +158,32 @@ object OffloadPermissionManager {
      *  — prevents the agent from spamming the user with the same
      *  request after they already said no. Cleared with
      *  [clearSessionGrants]. */
-    private val sessionDenials = mutableMapOf<String, MutableSet<String>>() // sessionId -> set of toolNames
+    private val sessionDenials = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>() // sessionId -> set of toolNames
 
-    /** Active permission request waiting for user response. */
+    private fun concurrentSet(): MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** Head of the approval queue — the card the UI should show right now. */
     private val _pendingRequest = MutableStateFlow<PermissionRequest?>(null)
     val pendingRequest: StateFlow<PermissionRequest?> = _pendingRequest.asStateFlow()
 
-    private var pendingContinuation: kotlin.coroutines.Continuation<Response>? = null
+    /**
+     * [T-scheduled-force-approval] FIFO of in-flight approval requests.
+     * The old single `pendingContinuation` slot silently overwrote the
+     * previous waiter when two offload IPC threads hit ASK_ONCE at the
+     * same time — the first caller then hung forever. Queue + lock keeps
+     * every caller paired with exactly one card, shown one at a time.
+     */
+    private class PendingEntry(
+        val request: PermissionRequest,
+        val cont: CancellableContinuation<Response>,
+    )
+
+    private val pendingLock = Any()
+    private val pendingQueue = ArrayDeque<PendingEntry>()
+
+    /** Fail-closed timeout for one approval card round-trip. */
+    const val PERMISSION_DIALOG_TIMEOUT_MS: Long = 120_000L
 
     // ── Android system runtime permission request (for location etc.) ──────────
 
@@ -313,7 +377,15 @@ object OffloadPermissionManager {
         val info = toolRegistry.find { it.toolName == toolName }
             ?: return PermissionLevel.BYPASS // Unknown tools are bypassed
 
-        val stored = prefs.getString("level_$toolName", null)
+        val override = levelStoreOverride
+        // [T-phone-native-tool] prefs is lateinit (installed by init at app
+        // startup). A read before init — early startup or a JVM test — must
+        // fall back to the registry default, not crash.
+        val stored = when {
+            override != null -> override["level_$toolName"]
+            ::prefs.isInitialized -> prefs.getString("level_$toolName", null)
+            else -> null
+        }
         return if (stored != null) {
             try { PermissionLevel.valueOf(stored) } catch (_: Exception) { info.defaultLevel }
         } else {
@@ -322,7 +394,12 @@ object OffloadPermissionManager {
     }
 
     fun setLevel(toolName: String, level: PermissionLevel) {
-        prefs.edit().putString("level_$toolName", level.name).apply()
+        val override = levelStoreOverride
+        if (override != null) {
+            override["level_$toolName"] = level.name
+        } else {
+            prefs.edit().putString("level_$toolName", level.name).apply()
+        }
     }
 
     fun resetAll() {
@@ -362,28 +439,14 @@ object OffloadPermissionManager {
                 // T338: a prior "Deny in this session" short-circuits
                 // before any grants check or dialog so the agent can't
                 // spam the user.
-                val denials = sessionDenials.getOrPut(sessionId) { mutableSetOf() }
+                val denials = sessionDenials.computeIfAbsent(sessionId) { concurrentSet() }
                 if (toolName in denials) return false
 
-                val grants = sessionGrants.getOrPut(sessionId) { mutableSetOf() }
+                val grants = sessionGrants.computeIfAbsent(sessionId) { concurrentSet() }
                 if (toolName in grants) return true
 
-                // Show dialog and wait for response.
-                val info = toolRegistry.find { it.toolName == toolName }
-                val response = suspendCancellableCoroutine<Response> { cont ->
-                    pendingContinuation = cont
-                    _pendingRequest.value = PermissionRequest(
-                        toolName = toolName,
-                        toolTitle = toolTitle,
-                        description = "Allow ${info?.displayName ?: toolName} access?",
-                        sessionId = sessionId,
-                    )
-                    cont.invokeOnCancellation {
-                        _pendingRequest.value = null
-                        pendingContinuation = null
-                    }
-                }
-
+                val response = awaitApproval(toolName, toolTitle, sessionId, forceAsk = false)
+                    ?: return false // timeout / cancellation → fail closed
                 when (response) {
                     Response.ALLOW_SESSION -> {
                         grants.add(toolName)
@@ -399,11 +462,92 @@ object OffloadPermissionManager {
         }
     }
 
+    /**
+     * [T-scheduled-force-approval] Mandatory per-call approval that no
+     * preset can skip: BYPASS is downgraded to a prompt, session grants
+     * and denials are ignored, and ALLOW_SESSION responses are demoted
+     * to ALLOW_ONCE — every call gets its own card. NOT_ALLOWED still
+     * hard-denies without a dialog: this gate can only tighten, never
+     * loosen, the stored policy. Used for scheduled-task mutations
+     * (create / delete / enable / disable / run).
+     *
+     * Returns null on timeout so callers fail closed.
+     */
+    suspend fun enforceAlwaysAsk(toolName: String, toolTitle: String, sessionId: String): Boolean {
+        if (getLevel(toolName) == PermissionLevel.NOT_ALLOWED) return false
+        val response = awaitApproval(toolName, toolTitle, sessionId, forceAsk = true)
+            ?: return false
+        return response == Response.ALLOW_ONCE || response == Response.ALLOW_SESSION
+    }
+
+    /**
+     * Enqueue one approval card and suspend until the user responds,
+     * the caller is cancelled, or [PERMISSION_DIALOG_TIMEOUT_MS] elapses
+     * (null → deny). Cards are shown strictly one at a time; concurrent
+     * callers queue instead of overwriting each other.
+     */
+    private suspend fun awaitApproval(
+        toolName: String,
+        toolTitle: String,
+        sessionId: String,
+        forceAsk: Boolean,
+    ): Response? {
+        val info = toolRegistry.find { it.toolName == toolName }
+        val request = PermissionRequest(
+            toolName = toolName,
+            toolTitle = toolTitle,
+            description = "Allow ${info?.displayName ?: toolName} access?",
+            sessionId = sessionId,
+            forceAsk = forceAsk,
+        )
+        return withTimeoutOrNull(PERMISSION_DIALOG_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                val entry = PendingEntry(request, cont)
+                synchronized(pendingLock) {
+                    pendingQueue.addLast(entry)
+                    if (pendingQueue.size == 1) _pendingRequest.value = request
+                }
+                cont.invokeOnCancellation { removePending(entry) }
+            }
+        }.also { result ->
+            if (result == null) {
+                // Timeout path: withTimeoutOrNull already cancelled the
+                // inner coroutine, but scrub defensively so no stale card
+                // can linger if cancellation raced the queue head.
+                synchronized(pendingLock) {
+                    if (pendingQueue.firstOrNull()?.request === request) {
+                        pendingQueue.removeFirst()
+                        _pendingRequest.value = pendingQueue.firstOrNull()?.request
+                    }
+                }
+            }
+        }
+    }
+
+    /** Drop a cancelled/timed-out entry and surface the next card, if any. */
+    private fun removePending(entry: PendingEntry) {
+        synchronized(pendingLock) {
+            val wasHead = pendingQueue.firstOrNull() === entry
+            pendingQueue.remove(entry)
+            if (wasHead) _pendingRequest.value = pendingQueue.firstOrNull()?.request
+        }
+    }
+
     /** Called from UI when user responds to the permission dialog. */
     fun respondToRequest(response: Response) {
-        _pendingRequest.value = null
-        pendingContinuation?.resume(response)
-        pendingContinuation = null
+        val entry = synchronized(pendingLock) {
+            val head = pendingQueue.removeFirstOrNull() ?: return
+            _pendingRequest.value = pendingQueue.firstOrNull()?.request
+            head
+        }
+        // Force-ask cards never cache anything: demote ALLOW_SESSION to
+        // ALLOW_ONCE. A deny (including dismiss) is delivered as-is but
+        // enforceAlwaysAsk ignores sessionDenials, so it only rejects
+        // this one call — the next mutation still gets its own card.
+        val effective = if (entry.request.forceAsk && response == Response.ALLOW_SESSION) {
+            Response.ALLOW_ONCE
+        } else response
+        entry.cont.resume(effective)
     }
 
     /** Clear session grants AND denials (call when a session ends). */

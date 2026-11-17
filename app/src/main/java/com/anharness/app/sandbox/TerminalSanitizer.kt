@@ -15,21 +15,27 @@ object TerminalSanitizer {
     )
 
     /**
-     * Sanitize terminal output in two passes:
-     * 1. CR folding — simulate carriage return overwriting
-     * 2. Strip remaining ANSI/VT escape sequences
+     * Sanitize terminal output:
+     * 1. Strip ANSI/VT escape sequences FIRST — escapes are zero-width on
+     *    a real terminal, so they must not occupy overwrite columns.
+     * 2. CR folding — simulate carriage return overwriting.
+     * 3. Drop remaining control chars / PRoot "null" artifacts.
+     *
+     * No final trim: trailing spaces can be real overwrite residue
+     * ("downloading" → "complete   " keeps the last three columns), and
+     * stripping them silently corrupts progress-bar output.
      */
     fun sanitize(raw: String): String {
         if (raw.isEmpty()) return raw
 
-        // Pass 1: CR folding
-        val crFolded = foldCarriageReturns(raw)
+        // Pass 1: Strip ANSI sequences (before folding — see above).
+        val stripped = ANSI_REGEX.replace(raw, "")
 
-        // Pass 2: Strip ANSI sequences
-        val stripped = ANSI_REGEX.replace(crFolded, "")
+        // Pass 2: CR folding
+        val crFolded = foldCarriageReturns(stripped)
 
         // Pass 3: Remove null bytes and non-printable control chars (except \n \t)
-        val cleaned = stripped.filter { it == '\n' || it == '\t' || it.code >= 0x20 }
+        val cleaned = crFolded.filter { it == '\n' || it == '\t' || it.code >= 0x20 }
 
         // Pass 4: Remove "null" artifacts from PRoot/pipe issues
         // - Lines that are entirely "null"
@@ -41,7 +47,7 @@ object TerminalSanitizer {
             .replace(Regex("(?:null){2,}"), "") // Remove runs of 2+ consecutive "null"
 
         // Pass 5: Collapse excessive blank lines (3+ consecutive → 2)
-        return noNullLines.replace(Regex("\n{3,}"), "\n\n").trim()
+        return noNullLines.replace(Regex("\n{3,}"), "\n\n")
     }
 
     /**
@@ -58,10 +64,13 @@ object TerminalSanitizer {
     }
 
     /**
-     * Simulate CR (\r) behavior: when a line contains \r (without \n),
-     * the text after \r overwrites from the beginning of the line.
-     * Each \r resets the cursor to position 0, so only the last segment's
-     * content (up to its length) is visible.
+     * Simulate CR (\r) with a real column buffer: each \r resets the
+     * cursor to column 0 and subsequent characters OVERWRITE in place —
+     * columns beyond the new text keep their previous content. The old
+     * "last non-empty segment wins" model dropped that residue, turning
+     * "AAAA\rBB" into "BB" instead of the terminal-visible "BBAA", and
+     * losing wget/progress-bar tails. A trailing \r before \n (CRLF)
+     * resets an already-flushed line cursor and is a no-op.
      */
     private fun foldCarriageReturns(text: String): String {
         val lines = text.split('\n')
@@ -75,13 +84,21 @@ object TerminalSanitizer {
                 continue
             }
 
-            // Split on CR and simulate overwriting.
-            // Each CR resets cursor to column 0. The last non-empty segment wins.
-            val segments = line.split('\r')
-            val lastNonEmpty = segments.lastOrNull { it.isNotEmpty() }
-            if (lastNonEmpty != null) {
-                result.append(lastNonEmpty)
+            val buffer = StringBuilder()
+            var cursor = 0
+            for (ch in line) {
+                if (ch == '\r') {
+                    cursor = 0
+                    continue
+                }
+                if (cursor < buffer.length) {
+                    buffer.setCharAt(cursor, ch)
+                } else {
+                    buffer.append(ch)
+                }
+                cursor++
             }
+            result.append(buffer)
         }
 
         return result.toString()

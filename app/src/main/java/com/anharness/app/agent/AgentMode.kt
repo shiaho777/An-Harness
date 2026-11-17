@@ -30,7 +30,7 @@ enum class AgentMode(
         enabledTools = setOf(
             "shell_execute", "file_read", "file_write", "file_edit",
             "read_image", "browser_use", "memory_write", "memory_get",
-            "exit_plan_mode",
+            "exit_plan_mode", "phone_use",
         ),
     ),
     CODE(

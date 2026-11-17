@@ -200,4 +200,102 @@ class CompactionTest {
         assertTrue(out.contains("chars omitted"))
         assertTrue(out.length < 5000)
     }
+
+    // ── usage-anchored estimation ──────────────────────────────────
+
+    private fun anchoredAssistant(input: Int, output: Int) = LlmMessage.Assistant(
+        "a".repeat(100),
+        usage = com.anharness.llm.LlmUsage(inputTokens = input, outputTokens = output),
+    )
+
+    @Test
+    fun anchoredEstimateUsesLastUsagePlusDelta() {
+        val messages = listOf(
+            user(400),                    // pre-anchor: covered by usage, not re-counted
+            anchoredAssistant(900, 100),  // anchor: 1000 real tokens
+            user(100),                    // delta: 25 heuristic tokens
+            toolResult(100),              // delta: 25
+        )
+        assertEquals(1050, estimateContextTokensAnchored(messages))
+        // Plain heuristic stays untouched (chars/4 contract).
+        assertEquals(estimateContextTokens(messages), messages.sumOf(::estimateTokens))
+    }
+
+    @Test
+    fun anchoredEstimatePrefersLastAnchor() {
+        val messages = listOf(
+            anchoredAssistant(500, 50),
+            user(100),
+            anchoredAssistant(2000, 200), // newer anchor wins
+            user(40),                     // delta 10
+        )
+        assertEquals(2210, estimateContextTokensAnchored(messages))
+    }
+
+    @Test
+    fun anchoredEstimateFallsBackWithoutUsage() {
+        val messages = turn(100) + turn(100)
+        assertEquals(estimateContextTokens(messages), estimateContextTokensAnchored(messages))
+        // Assistant with output-only usage is NOT an anchor (input unknown).
+        val outputOnly = listOf(
+            LlmMessage.Assistant("x", usage = com.anharness.llm.LlmUsage(outputTokens = 999)),
+            user(100),
+        )
+        assertEquals(estimateContextTokens(outputOnly), estimateContextTokensAnchored(outputOnly))
+    }
+
+    @Test
+    fun cjkUndercountTriggersCompactionOnlyWhenAnchored() = runTest {
+        // 400 CJK chars ≈ 400+ real tokens, but chars/4 says 100. Window
+        // 300 − reserve 50 → threshold 250: heuristic passes through,
+        // anchor must compact. This is the exact production failure mode.
+        val cjk = LlmMessage.User("测".repeat(400))
+        val messages = listOf(
+            cjk,
+            anchoredAssistant(450, 30), // real context 480 > 250
+            user(40),
+            assistant(40),
+        )
+        val settings = CompactionSettings(reserveTokens = 50, keepRecentTokens = 30)
+        assertFalse(shouldCompact(estimateContextTokens(messages), 300, settings))
+        assertTrue(shouldCompact(estimateContextTokensAnchored(messages), 300, settings))
+
+        val strategy = LlmSummarizingCompaction(
+            contextWindow = ContextWindowSource { 300 },
+            settingsSource = CompactionSettingsSource { settings },
+            request = FakeRequest(reply = "SUMMARY"),
+        )
+        val out = strategy.compact(messages)
+        assertTrue("anchored context must compact", out.first() is LlmMessage.User)
+        assertTrue((out.first() as LlmMessage.User).text.contains("SUMMARY"))
+    }
+
+    @Test
+    fun anchoredBelowThresholdStillPassesThrough() = runTest {
+        val messages = listOf(user(100), anchoredAssistant(50, 10), user(40))
+        val strategy = LlmSummarizingCompaction(
+            contextWindow = ContextWindowSource { 100_000 },
+            settingsSource = CompactionSettingsSource { CompactionSettings() },
+            request = FakeRequest(),
+        )
+        assertEquals(messages, strategy.compact(messages))
+    }
+
+    @Test
+    fun anchoredSummarizationFailureKeepsOriginalContext() = runTest {
+        val messages = listOf(
+            LlmMessage.User("测".repeat(400)),
+            anchoredAssistant(450, 30),
+            user(40),
+            assistant(40),
+        )
+        val strategy = LlmSummarizingCompaction(
+            contextWindow = ContextWindowSource { 300 },
+            settingsSource = CompactionSettingsSource {
+                CompactionSettings(reserveTokens = 50, keepRecentTokens = 30)
+            },
+            request = FakeRequest(reply = null),
+        )
+        assertEquals(messages, strategy.compact(messages))
+    }
 }

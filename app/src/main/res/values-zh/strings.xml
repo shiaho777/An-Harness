@@ -307,6 +307,9 @@
     <string name="offload_perm_allow_session">本会话总是允许</string>
     <string name="offload_perm_allow_once">允许这一次</string>
     <string name="offload_perm_deny_session">本会话里拒绝</string>
+    <string name="offload_perm_force_ask_note">此操作始终需要你逐次批准，即使权限已设为自动允许。每次调用都会单独询问。</string>
+    <string name="voice_call_start">开始免提通话</string>
+    <string name="voice_call_end">结束免提通话</string>
     <string name="session_skills_title">会话中的技能</string>
     <string name="session_skills_header_installed">已安装</string>
     <string name="session_skills_enable_all">全部启用</string>

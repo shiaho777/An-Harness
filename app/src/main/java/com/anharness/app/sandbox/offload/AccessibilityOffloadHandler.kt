@@ -13,6 +13,7 @@ import com.anharness.app.accessibility.MinisAccessibilityService
 import com.anharness.app.accessibility.NodeRegistry
 import com.anharness.app.accessibility.RestrictedSettingsManager
 import com.anharness.app.logging.AppLogger
+import com.anharness.app.offload.OffloadPermissionManager
 import com.anharness.app.sandbox.NativeOffloadHandler
 import com.anharness.app.sandbox.NativeOffloadRequest
 import com.anharness.app.sandbox.NativeOffloadResult
@@ -170,9 +171,13 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         com.anharness.app.service.SessionActivityTracker.updateToolStatus(
             statusForSubAction(sub, args.positional.getOrNull(1), args),
         )
+        // [T-phone-safety-gate] Final safety gate BEFORE any mutation runs.
+        // Read-only groups pass; tap/input/scroll/gesture/screenshot/dialog
+        // dismissal get the blocklist + password + per-call-card treatment.
+        phoneGate(args, sub, request.sessionId)?.let { return it }
         return try {
             when (sub) {
-                "ui"        -> uiSub(args)
+                "ui"        -> uiSub(args, request.sessionId)
                 "tap"       -> tapSub(args)
                 "input"     -> inputSub(args)
                 "scroll"    -> scrollSub(args)
@@ -194,6 +199,86 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             AppLogger.warning(TAG, "uncaught: ${e.javaClass.simpleName} ${e.message}")
             err(args, "INTERNAL", "${e.javaClass.simpleName}: ${e.message ?: ""}")
         }
+    }
+
+    // ── phone safety gate ────────────────────────────────────────────────
+
+    /**
+     * [T-phone-safety-gate] Enforce PhoneSafetyGate for one CLI invocation.
+     * Returns null to proceed, or the error envelope to short-circuit.
+     * Runs on the offload worker thread; runBlocking bridges to the
+     * suspend approval queue exactly like OffloadGate.allow.
+     */
+    private fun phoneGate(args: OffloadArgs, sub: String, sessionId: String?): NativeOffloadResult? {
+        val action = canonicalAction(sub, args) ?: return null // read-only / diagnostic
+        val svc = MinisAccessibilityService.getInstance()
+        val (pkg, _) = svc?.foregroundPackage() ?: (null to null)
+        val targetIsPassword = targetNodeIsPassword(svc, args)
+        val sid = sessionId ?: OffloadPermissionManager.OFFLOAD_GLOBAL_SESSION_ID
+        val override = com.anharness.app.phone.PhoneSafetyManager.hasOverride(sid, pkg)
+        var (verdict, reason) = com.anharness.app.phone.PhoneSafetyGate.decide(action, pkg, targetIsPassword, override)
+
+        if (verdict == com.anharness.app.phone.PhoneSafetyGate.Verdict.DENY) {
+            // Password fields: absolute, no override path.
+            if (reason == com.anharness.app.phone.PhoneSafetyGate.Reason.PASSWORD_FIELD) {
+                return err(args, "SAFETY_BLOCKED",
+                    com.anharness.app.phone.PhoneSafetyGate.denyMessage(reason, pkg), exit = 77)
+            }
+            // Blocklisted app: offer a session-scoped override card. The
+            // user must explicitly approve; deny/timeout stays blocked.
+            val unlocked = pkg != null && kotlinx.coroutines.runBlocking {
+                com.anharness.app.phone.PhoneSafetyManager.requestOverride(sid, pkg)
+            }
+            if (!unlocked) {
+                return err(args, "SAFETY_BLOCKED",
+                    com.anharness.app.phone.PhoneSafetyGate.denyMessage(reason!!, pkg), exit = 77)
+            }
+            val re = com.anharness.app.phone.PhoneSafetyGate.decide(action, pkg, targetIsPassword, true)
+            verdict = re.first; reason = re.second
+        }
+
+        if (verdict == com.anharness.app.phone.PhoneSafetyGate.Verdict.ASK) {
+            val label = "Phone control: $action" + (pkg?.let { " in $it" } ?: "")
+            val allowed = kotlinx.coroutines.runBlocking {
+                com.anharness.app.phone.PhoneSafetyManager.requestActionApproval(sid, label)
+            }
+            if (!allowed) {
+                return err(args, "SAFETY_DENIED",
+                    "Phone control action '$action' was not approved.", exit = 77)
+            }
+        }
+        return null
+    }
+
+    /** Map CLI group+sub to a canonical gate action; null = no gate needed. */
+    private fun canonicalAction(sub: String, args: OffloadArgs): String? = when (sub) {
+        "tap", "scroll", "gesture" -> sub
+        "input" -> when (args.positional.getOrNull(1)) {
+            "text", "clear" -> "input.text"
+            "key" -> "input.key"
+            else -> null
+        }
+        "ui" -> if (args.positional.getOrNull(1) == "screenshot") "ui.screenshot" else null
+        "dialog" -> if (args.positional.getOrNull(1) == "dismiss") "dialog.dismiss" else null
+        else -> null
+    }
+
+    /**
+     * Password-field detection for the action's target: explicit --node,
+     * tap node/text/id target, or the focused editable for input. Reads
+     * live node flags; unknown target → false (the app-level blocklist
+     * still applies).
+     */
+    private fun targetNodeIsPassword(svc: MinisAccessibilityService?, args: OffloadArgs): Boolean {
+        if (svc == null) return false
+        val node: AccessibilityNodeInfo? = when {
+            args.get("node") != null -> svc.nodeRegistry.get(args.get("node")!!)
+            args.positional.getOrNull(0) == "tap" && args.positional.getOrNull(1) == "node" ->
+                args.positional.getOrNull(2)?.let { svc.nodeRegistry.get(it) }
+            args.positional.getOrNull(0) == "input" -> resolveTargetEditable(svc, args)
+            else -> null
+        }
+        return node?.isPassword == true
     }
 
     // ── service ──────────────────────────────────────────────────────────
@@ -237,14 +322,14 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
 
     // ── ui ───────────────────────────────────────────────────────────────
 
-    private fun uiSub(args: OffloadArgs): NativeOffloadResult {
+    private fun uiSub(args: OffloadArgs, sessionId: String? = null): NativeOffloadResult {
         return when (args.positional.getOrNull(1)) {
             null         -> NativeOffloadResult(2, UI_HELP)
             "dump"       -> uiDump(args)
             "find"       -> uiFind(args)
             "info"       -> uiInfo(args)
             "node"       -> uiNode(args)
-            "screenshot" -> uiScreenshot(args)
+            "screenshot" -> uiScreenshot(args, sessionId)
             else         -> NativeOffloadResult(2, "$TOOL ui: unknown action\n$UI_HELP")
         }
     }
@@ -297,6 +382,9 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             obj.put("longClickable", n.isLongClickable)
             obj.put("scrollable", n.isScrollable)
             obj.put("editable", n.isEditable)
+            // [T-phone-safety-gate] Password fields are never automatable;
+            // surface the flag so the agent can avoid them proactively.
+            obj.put("isPassword", n.isPassword)
             obj.put("checkable", n.isCheckable)
             obj.put("checked", n.isChecked)
             obj.put("focusable", n.isFocusable)
@@ -395,7 +483,7 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         return ok(args, data)
     }
 
-    private fun uiScreenshot(args: OffloadArgs): NativeOffloadResult {
+    private fun uiScreenshot(args: OffloadArgs, sessionId: String? = null): NativeOffloadResult {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             return err(args, "NOT_SUPPORTED",
                 "ui screenshot requires Android 11 (API 30); use `android-shizuku-cli exec screencap` instead.")
@@ -442,12 +530,26 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             return ok(args, data)
         }
 
-        val dir = (context.getExternalFilesDir("a11y_screenshots") ?: java.io.File(context.cacheDir, "a11y_screenshots"))
+        // [T-phone-native-tool] With a chat session, write into the session
+        // offloads dir so the agent can address the shot via a Linux path
+        // (read_image / shell). The old externalFilesDir location was NOT
+        // bind-mounted into PRoot, so the returned host path was unreadable
+        // from inside the sandbox. No session → legacy host path.
+        val dir: java.io.File
+        val linuxDir: String?
+        if (sessionId != null) {
+            dir = java.io.File(context.filesDir, "minis-sessions/$sessionId/offloads/phone")
+            linuxDir = "/var/minis/offloads/phone"
+        } else {
+            dir = (context.getExternalFilesDir("a11y_screenshots") ?: java.io.File(context.cacheDir, "a11y_screenshots"))
+            linuxDir = null
+        }
         if (!dir.exists()) dir.mkdirs()
         val file = java.io.File(dir, "a11y_${System.currentTimeMillis()}.png")
         return try {
             java.io.FileOutputStream(file).use { it.write(pngBytes) }
-            data.put("path", file.absolutePath)
+            data.put("path", if (linuxDir != null) "$linuxDir/${file.name}" else file.absolutePath)
+            data.put("hostPath", file.absolutePath)
             ok(args, data)
         } catch (t: Throwable) {
             AppLogger.warning(TAG, "screenshot write failed: ${t.message}")

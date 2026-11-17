@@ -74,6 +74,24 @@ object CompactionAdapter {
     }
 
     /**
+     * [T-usage-anchored-compaction] Stamp the provider's real token count
+     * onto the LAST assistant message so the core pipeline can anchor on
+     * it (chars/4 undercounts CJK ~4x). App history rows don't carry usage
+     * — ChatViewModel holds the live counter (`lastContextTokens`, the
+     * API's full prompt size for the most recent call) and passes it here.
+     * Null/≤0 or no assistant message → list unchanged (heuristic path).
+     */
+    fun withUsageAnchor(messages: List<LlmMessage>, latestContextTokens: Int?): List<LlmMessage> {
+        if (latestContextTokens == null || latestContextTokens <= 0) return messages
+        val idx = messages.indexOfLast { it is LlmMessage.Assistant }
+        if (idx < 0) return messages
+        val anchor = messages[idx] as LlmMessage.Assistant
+        return messages.toMutableList().also {
+            it[idx] = anchor.copy(usage = com.anharness.llm.LlmUsage(inputTokens = latestContextTokens))
+        }
+    }
+
+    /**
      * Create a [SummaryRequest] backed by an active [LLMProvider].
      * Single-shot completion with max 4096 tokens, no tools, thinking OFF.
      */
@@ -131,15 +149,16 @@ object CompactionAdapter {
         messages: List<LLMMessage>,
         previousSummary: String?,
         provider: LLMProvider,
+        latestContextTokens: Int? = null,
     ): String? {
-        val coreMessages = toLlmMessages(messages)
+        val coreMessages = withUsageAnchor(toLlmMessages(messages), latestContextTokens)
         if (coreMessages.isEmpty()) return null
         val prep = CompactionPreparation(
             messagesToSummarize = coreMessages,
             turnPrefixMessages = emptyList(),
             retainedTail = emptyList(),
             isSplitTurn = false,
-            tokensBefore = com.anharness.agent.estimateContextTokens(coreMessages),
+            tokensBefore = com.anharness.agent.estimateContextTokensAnchored(coreMessages),
         )
         val request = providerSummaryRequest(provider)
         return generateSummary(prep, previousSummary, null, request)

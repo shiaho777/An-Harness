@@ -2,6 +2,7 @@ package com.anharness.app.sandbox.offload
 
 import android.content.Context
 import com.anharness.app.logging.AppLogger
+import com.anharness.app.offload.OffloadPermissionManager
 import com.anharness.app.sandbox.NativeOffloadHandler
 import com.anharness.app.sandbox.NativeOffloadRequest
 import com.anharness.app.sandbox.NativeOffloadResult
@@ -28,6 +29,8 @@ import java.util.Calendar
  *                          [--model <modelId>]
  *                          [--start YYYY-MM-DD] [--end YYYY-MM-DD]
  *                          [--disabled]
+ *   minis-scheduled update --id <taskId> [any create flag] [--enabled|--disabled]
+ *                          (field-level merge; id + run history preserved)
  *   minis-scheduled delete --id <taskId>
  *   minis-scheduled enable  --id <taskId>
  *   minis-scheduled disable --id <taskId>
@@ -45,36 +48,69 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
     override fun handle(request: NativeOffloadRequest): NativeOffloadResult {
         val args = OffloadArgs(
             request.argv.drop(1),
-            booleanFlags = setOf("disabled", "h", "help"),
+            booleanFlags = setOf("disabled", "enabled", "h", "help"),
         )
         // [T-offload-defaults-batch-android] Help only on explicit
         // --help/-h; no subcommand defaults to `list`.
         if (args.hasFlag("h", "help")) {
             return NativeOffloadResult(0, HELP)
         }
+        // [T-scheduled-force-approval] Mutations get a mandatory per-call
+        // approval card — BYPASS and prior session grants cannot skip it.
+        // `list` stays read-only and ungated beyond the base level.
+        val sub = args.positional.firstOrNull() ?: "list"
+        if (sub in OffloadPermissionManager.scheduledMutationSubcommands) {
+            OffloadGate.enforceAlwaysAsk(
+                "scheduled_task",
+                "minis-scheduled $sub",
+                args,
+                request,
+            )?.let { return it }
+        }
         return try {
-            when (val sub = args.positional.firstOrNull() ?: "list") {
-                "list" -> handleList()
+            when (sub) {
+                "list" -> handleList(args)
                 "create", "add" -> handleCreate(args)
+                "update", "edit" -> handleUpdate(args)
                 "delete", "remove", "rm" -> handleDelete(args)
                 "enable" -> handleSetEnabled(args, true)
                 "disable" -> handleSetEnabled(args, false)
                 "run" -> handleRun(args)
-                else -> NativeOffloadResult(2, "minis-scheduled: unknown subcommand '$sub'\n$HELP")
+                else -> errorResult(2, "unknown_subcommand", "unknown subcommand '$sub'", args)
             }
         } catch (e: IllegalArgumentException) {
-            NativeOffloadResult(2, "minis-scheduled: ${e.message}")
+            errorResult(2, "invalid_arguments", e.message ?: "invalid arguments", args)
         } catch (e: Throwable) {
             AppLogger.warning(TAG, "handle failed: ${e.message}")
-            NativeOffloadResult(1, "minis-scheduled: ${e.message}")
+            errorResult(1, "internal", e.message ?: "unknown", args)
         }
     }
 
-    private fun handleList(): NativeOffloadResult {
+    /**
+     * [T-scheduled-error-envelope] Structured error body, same shape as
+     * the other android-* CLIs (CalendarOffloadHandler's catch path):
+     * `{error: <code>, message: <detail>}` through [OffloadOutput] so
+     * --compact/-q shape errors identically to successes. Exit codes
+     * keep their meaning: 2 = caller mistake, 1 = runtime failure.
+     */
+    private fun errorResult(
+        exitCode: Int,
+        error: String,
+        message: String,
+        args: OffloadArgs,
+    ): NativeOffloadResult {
+        val body = JSONObject().put("error", error).put("message", message).toString()
+        return NativeOffloadResult(exitCode, OffloadOutput.formatBody(body, args) + "\n")
+    }
+
+    private fun notFound(id: String, args: OffloadArgs): NativeOffloadResult =
+        errorResult(1, "not_found", "no task with id=$id", args)
+
+    private fun handleList(args: OffloadArgs): NativeOffloadResult {
         val arr = JSONArray()
         for (t in manager.list()) arr.put(taskJson(t))
         val out = JSONObject().put("tasks", arr).put("count", arr.length())
-        return NativeOffloadResult(0, out.toString(2))
+        return NativeOffloadResult(0, OffloadOutput.formatBody(out.toString(2), args) + "\n")
     }
 
     private fun handleCreate(args: OffloadArgs): NativeOffloadResult {
@@ -105,26 +141,50 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
         )
         manager.create(task)
         val out = JSONObject().put("created", taskJson(task))
-        return NativeOffloadResult(0, out.toString(2))
+        return NativeOffloadResult(0, OffloadOutput.formatBody(out.toString(2), args) + "\n")
+    }
+
+    /**
+     * [T-scheduled-cli-update] In-place edit: only passed flags change;
+     * id / createdAt / runHistory / lastResult* survive (delete+recreate
+     * used to be the only path and lost all of them). Merge + validation
+     * live in [ScheduledTaskMerge] so they're JVM-testable.
+     */
+    private fun handleUpdate(args: OffloadArgs): NativeOffloadResult {
+        val id = args.get("id") ?: throw IllegalArgumentException("--id required")
+        val old = manager.get(id) ?: return notFound(id, args)
+        val merged = ScheduledTaskMerge.merge(
+            old = old,
+            args = args,
+            parseTime = ::parseTime,
+            parseRepeat = ::parseRepeat,
+            parseDays = ::parseDays,
+            parseDate = ::parseDate,
+        )
+        manager.update(merged)
+        val out = JSONObject().put("updated", taskJson(merged))
+        return NativeOffloadResult(0, OffloadOutput.formatBody(out.toString(2), args) + "\n")
     }
 
     private fun handleDelete(args: OffloadArgs): NativeOffloadResult {
         val id = args.get("id") ?: throw IllegalArgumentException("--id required")
-        if (manager.get(id) == null) return NativeOffloadResult(1, "minis-scheduled: no task with id=$id")
+        if (manager.get(id) == null) return notFound(id, args)
         manager.delete(id)
-        return NativeOffloadResult(0, JSONObject().put("deleted", id).toString())
+        val out = JSONObject().put("deleted", id).toString()
+        return NativeOffloadResult(0, OffloadOutput.formatBody(out, args) + "\n")
     }
 
     private fun handleSetEnabled(args: OffloadArgs, enabled: Boolean): NativeOffloadResult {
         val id = args.get("id") ?: throw IllegalArgumentException("--id required")
-        if (manager.get(id) == null) return NativeOffloadResult(1, "minis-scheduled: no task with id=$id")
+        if (manager.get(id) == null) return notFound(id, args)
         manager.setEnabled(id, enabled)
-        return NativeOffloadResult(0, JSONObject().put("id", id).put("enabled", enabled).toString())
+        val out = JSONObject().put("id", id).put("enabled", enabled).toString()
+        return NativeOffloadResult(0, OffloadOutput.formatBody(out, args) + "\n")
     }
 
     private fun handleRun(args: OffloadArgs): NativeOffloadResult {
         val id = args.get("id") ?: throw IllegalArgumentException("--id required")
-        val task = manager.get(id) ?: return NativeOffloadResult(1, "minis-scheduled: no task with id=$id")
+        val task = manager.get(id) ?: return notFound(id, args)
         // Fire immediately, off-schedule. Blocks until the agent loop finishes
         // (ScheduledAgentRunner waits internally). Mirrors the editor "Run now".
         val sessionId = runBlocking {
@@ -133,8 +193,14 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
         val out = JSONObject()
             .put("id", id)
             .put("ran", sessionId != null)
-            .apply { if (sessionId != null) put("sessionId", sessionId) }
-        return NativeOffloadResult(if (sessionId != null) 0 else 1, out.toString(2))
+            .apply {
+                if (sessionId != null) put("sessionId", sessionId)
+                else put("error", "run_failed").put("message", "task did not produce a session")
+            }
+        return NativeOffloadResult(
+            if (sessionId != null) 0 else 1,
+            OffloadOutput.formatBody(out.toString(2), args) + "\n",
+        )
     }
 
     // ── parsing helpers ──
@@ -224,6 +290,8 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
                    [--repeat once|daily|weekdays|custom --days mon,tue,...]
                    [--target new|follow-up|rerun --session <id> --message <id>]
                    [--model <modelId>] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--disabled]
+            update --id <taskId> [any create flag] [--enabled|--disabled]
+                   only passed flags change; id and run history are kept
             delete  --id <taskId>
             enable  --id <taskId>
             disable --id <taskId>

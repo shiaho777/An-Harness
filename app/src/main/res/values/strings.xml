@@ -354,6 +354,12 @@
     <string name="offload_perm_allow_session">Allow in this session</string>
     <string name="offload_perm_allow_once">Allow once</string>
     <string name="offload_perm_deny_session">Deny in this session</string>
+    <!-- [T-scheduled-force-approval] Mandatory per-call card (scheduled-task
+         mutations). No preset can skip it; only allow-once / deny apply. -->
+    <string name="offload_perm_force_ask_note">This action always requires your approval, even with permissions set to bypass. Each call is approved separately.</string>
+    <!-- [T-voice-call-duplex] Hands-free voice call toggle. -->
+    <string name="voice_call_start">Start hands-free call</string>
+    <string name="voice_call_end">End hands-free call</string>
     <string name="session_skills_title">Skills in Session</string>
     <string name="session_skills_header_installed">INSTALLED</string>
     <string name="session_skills_enable_all">Enable All</string>

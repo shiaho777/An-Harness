@@ -96,7 +96,9 @@ fun TokenUsageSheet(
             }
 
             StatSection(title = stringResource(R.string.token_usage_section_tokens)) {
-                val inputTotal = (s?.input ?: 0L) + (s?.cacheRead ?: 0L) + (s?.cacheWrite ?: 0L)
+                // [T-usage-full-input-contract] input already includes the
+                // cache subsets — adding them again would double-count.
+                val inputTotal = s?.input ?: 0L
                 StatRow(stringResource(R.string.token_usage_input_with_cache), formatTokens(inputTotal))
                 StatRow(stringResource(R.string.token_usage_output), formatTokens(s?.output ?: 0L))
             }

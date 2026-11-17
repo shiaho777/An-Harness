@@ -5,6 +5,7 @@ import com.anharness.llm.LlmStreamEvent
 import com.anharness.llm.LlmToolDefinition
 import com.anharness.llm.ModelDescriptor
 import com.anharness.llm.StopReason
+import com.anharness.llm.stringArg
 import java.io.File
 import java.nio.file.Files
 import kotlinx.coroutines.flow.flowOf
@@ -43,6 +44,34 @@ private class FakeTool(
 }
 
 class AgentLoopTest {
+    @Test
+    fun doneUsageSurvivesOntoSessionAssistantMessage() = runTest {
+        val session = AgentSession(systemPrompt = "sys", tools = emptyList())
+        val loop = AgentLoop { _, _, _ ->
+            flowOf(
+                LlmStreamEvent.TextDelta("partial"),
+                LlmStreamEvent.Done(
+                    LlmMessage.Assistant(
+                        "final",
+                        usage = com.anharness.llm.LlmUsage(inputTokens = 1500, outputTokens = 60),
+                    ),
+                ),
+            )
+        }
+        val out = loop.run(
+            prompts = listOf(LlmMessage.User("hi")),
+            session = session,
+            config = AgentLoopConfig(model = fakeModel, apiKey = "k"),
+            emit = {},
+        )
+        val last = out.last() as LlmMessage.Assistant
+        assertEquals(1500, last.usage?.inputTokens)
+        assertEquals(60, last.usage?.outputTokens)
+        // The session copy (what compaction later sees) carries it too.
+        val persisted = session.messages.filterIsInstance<LlmMessage.Assistant>().last()
+        assertEquals(1500, persisted.usage?.inputTokens)
+    }
+
     @Test
     fun runsToolsAndEmitsEvents() = runTest {
         val tool = FakeTool(toolDef("shell_execute"))
@@ -280,6 +309,64 @@ class AgentSessionStoreTest {
             val clone = store.clone(id)
             assertEquals(2, store.load(clone).size)
             assertEquals(3, store.list().size)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun assistantToolCallsAndUsageRoundTrip() {
+        val root = Files.createTempDirectory("anharness-sessions").toFile()
+        try {
+            val store = AgentSessionStore(root)
+            val id = store.create("t")
+            val call = com.anharness.llm.LlmToolCall(
+                "call_1", "file_read",
+                kotlinx.serialization.json.buildJsonObject { put("path", "/a.txt") },
+            )
+            val assistant = LlmMessage.Assistant(
+                "reading", listOf(call), StopReason.STOP,
+                usage = com.anharness.llm.LlmUsage(inputTokens = 900, outputTokens = 40),
+            )
+            store.append(id, LlmMessage.User("read /a.txt"))
+            store.append(id, assistant)
+            store.append(id, LlmMessage.ToolResult("call_1", "file_read", "content"))
+
+            val loaded = store.load(id)
+            assertEquals(3, loaded.size)
+            val back = loaded[1] as LlmMessage.Assistant
+            assertEquals(assistant, back) // full equality incl. args JSON + usage
+            // The chain is intact: result id matches a persisted call id.
+            val result = loaded[2] as LlmMessage.ToolResult
+            assertTrue(back.toolCalls.any { it.id == result.toolCallId })
+
+            // Fork carries the calls too (used to lose them silently).
+            val fork = store.fork(id, title = "f")
+            val forked = store.load(fork)[1] as LlmMessage.Assistant
+            assertEquals(1, forked.toolCalls.size)
+            assertEquals("/a.txt", forked.toolCalls[0].arguments.stringArg("path"))
+            assertEquals(900, forked.usage?.inputTokens)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun legacyRowsWithoutToolCallsStillDecode() {
+        val root = Files.createTempDirectory("anharness-sessions").toFile()
+        try {
+            val store = AgentSessionStore(root)
+            val id = store.create("t")
+            // Hand-write a pre-fix assistant row (no toolCalls/usage keys).
+            File(File(root, id), "messages.jsonl").writeText(
+                """{"role":"assistant","text":"old","stopReason":"STOP"}""" + "\n",
+            )
+            val loaded = store.load(id)
+            assertEquals(1, loaded.size)
+            val a = loaded[0] as LlmMessage.Assistant
+            assertEquals("old", a.text)
+            assertTrue(a.toolCalls.isEmpty())
+            assertNull(a.usage)
         } finally {
             root.deleteRecursively()
         }

@@ -1235,6 +1235,10 @@ class ChatViewModel(
             enabledTools = _agentMode.value.let {
                 if (it == com.anharness.app.agent.AgentMode.STANDARD) null else it.enabledTools
             },
+            // [T-phone-native-tool] Live service state — the catalog is
+            // recomputed on each read, so enabling/disabling the service
+            // takes effect on the next turn without a VM rebuild.
+            phoneControlAvailable = com.anharness.app.accessibility.MinisAccessibilityService.getInstance() != null,
         )
 
     /**
@@ -1854,6 +1858,18 @@ class ChatViewModel(
             title = "Harness",
             subtitle = "",
         ),
+        SlashCommand(
+            id = "subagent",
+            icon = Icons.Default.Hub,
+            title = "Subagent",
+            subtitle = "",
+        ),
+        SlashCommand(
+            id = "remote",
+            icon = Icons.Default.Hub,
+            title = "Remote",
+            subtitle = "",
+        ),
     )
 
     // [T-android-split-chat] filteredSlashCommands / updateSlashMenuState /
@@ -2104,10 +2120,139 @@ class ChatViewModel(
         when (cmd.id) {
             "plan" -> executePlanWithArgs(args)
             "mode" -> executeModeWithArgs(args)
+            "subagent" -> executeSubagentWithArgs(args)
+            "remote" -> executeRemoteWithArgs(args)
             else -> executeSlashCommand(cmd)
         }
         return true
     }
+
+    /**
+     * [T-remote-backend] `/remote` manages this session's execution backend:
+     *  - bare `/remote`        → show current binding + host list
+     *  - `/remote <hostId>`    → bind shell_execute to that remote host
+     *  - `/remote off|local`   → unbind (back to local sandbox)
+     *
+     * Binding changes WHERE shell commands run, never WHETHER they need
+     * approval — every remote command still passes RemoteShellTool's
+     * mandatory per-call card. File/browser/phone tools always stay local.
+     */
+    private fun executeRemoteWithArgs(args: String) {
+        val manager = com.anharness.app.remote.RemoteHostManager(context)
+        val sid = activeSessionId
+        val trimmed = args.trim()
+        when {
+            trimmed.isEmpty() -> {
+                val bound = remoteBindings.boundHost(sid)
+                val hosts = manager.list()
+                val boundLabel = bound?.let { id -> manager.get(id)?.label ?: id }
+                val list = if (hosts.isEmpty()) "  (none — add via minis-remote add)"
+                else hosts.joinToString("\n") { "  • ${it.id}  ${it.label} (${it.username}@${it.hostname})" }
+                appendSystemInfo(
+                    "Execution backend: " + (boundLabel?.let { "REMOTE ($it)" } ?: "LOCAL") +
+                        "\nHosts:\n$list\nBind with /remote <hostId>, unbind with /remote off.",
+                    "remote",
+                )
+            }
+            trimmed.equals("off", true) || trimmed.equals("local", true) -> {
+                remoteBindings.unbind(sid)
+                appendSystemInfo("Execution backend set to LOCAL (phone sandbox).", "remote")
+            }
+            else -> {
+                val host = manager.get(trimmed)
+                if (host == null) {
+                    appendSystemInfo("No remote host with id '$trimmed'. Use /remote to list hosts.", "remote")
+                    return
+                }
+                if (manager.loadSecret(host.id) == null) {
+                    appendSystemInfo("Host '${host.label}' has no stored credential; cannot bind.", "remote")
+                    return
+                }
+                remoteBindings.bind(sid, host.id)
+                appendSystemInfo(
+                    "Execution backend set to REMOTE: ${host.label} (${host.username}@${host.hostname}). " +
+                        "shell_execute now runs there; each command still needs your approval.",
+                    "remote",
+                )
+            }
+        }
+    }
+
+    /**
+     * [T-subagent-app-wiring] `/subagent <task>` delegates a bounded sub-task
+     * to a fresh sub-agent running on the CURRENT provider (via
+     * ProviderStreamAdapter), then posts the result + lineage back into the
+     * chat. Bare `/subagent` shows the lineage of recent spawns.
+     *
+     * The child inherits the session's file tools and the loop guard; the
+     * core SubAgentRunner enforces depth/concurrency caps and tighten-only
+     * permission gates. Runs off the main thread; never blocks the composer.
+     */
+    private fun executeSubagentWithArgs(args: String) {
+        val registry = subAgentRegistry
+        if (args.isBlank()) {
+            val nodes = registry.all()
+            if (nodes.isEmpty()) {
+                appendSystemInfo("No sub-agents yet. Use /subagent <task> to delegate one.", "subagent")
+            } else {
+                // Structured payload so the info card opens a graphical tree
+                // sheet (SubAgentLineageSheet), not just plain text.
+                val payload = org.json.JSONArray().apply {
+                    nodes.forEach { n ->
+                        put(org.json.JSONObject().apply {
+                            put("id", n.id)
+                            put("parentId", n.parentId ?: org.json.JSONObject.NULL)
+                            put("depth", n.depth)
+                            put("task", n.task)
+                            put("ok", n.ok ?: org.json.JSONObject.NULL)
+                            put("startedAt", n.startedAt)
+                            put("finishedAt", n.finishedAt ?: org.json.JSONObject.NULL)
+                        })
+                    }
+                }.toString()
+                appendSystemInfo("Sub-agent lineage (${nodes.size}) — tap ⓘ for the tree", "subagent", payload)
+            }
+            return
+        }
+        val provider = currentProvider
+        if (provider == null) {
+            appendSystemInfo("Configure a model first, then /subagent <task>.", "subagent")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            appendSystemInfo("Delegating to sub-agent: \"${args.take(80)}\"…", "subagent")
+            val sid = runCatching { ensureSession() }.getOrNull()
+            val session = com.anharness.agent.AgentSession(
+                systemPrompt = buildSystemPrompt() ?: "You are a helpful sub-agent.",
+                tools = com.anharness.app.harness.HarnessBridge.fileTools(context) { sid ?: activeSessionId },
+            )
+            val config = com.anharness.agent.AgentLoopConfig(
+                model = com.anharness.app.harness.ProviderStreamAdapter.descriptor(provider),
+                apiKey = "",
+                beforeToolCall = { subAgentGuard.before(it) },
+                afterToolCall = { subAgentGuard.after(it) },
+            )
+            val runner = com.anharness.agent.SubAgentRunner(
+                streamFn = com.anharness.app.harness.ProviderStreamAdapter.streamFn(provider),
+                registry = registry,
+                parentId = sid,
+            )
+            val result = runner.spawn(
+                com.anharness.agent.SubAgentTask(task = args),
+                session,
+                config,
+            )
+            val header = if (result.isError) "Sub-agent failed:" else "Sub-agent result:"
+            appendSystemInfo("$header\n${result.text}", "subagent")
+        }
+    }
+
+    /** Shared lineage registry + loop guard for /subagent spawns this session. */
+    private val subAgentRegistry = com.anharness.agent.SubAgentRegistry()
+    private val subAgentGuard = com.anharness.app.harness.HarnessBridge.LoopGuard()
+
+    /** [T-remote-backend] Per-session remote-host binding for shell routing. */
+    private val remoteBindings = com.anharness.app.remote.ExecutionBackend.Bindings(context)
 
     /**
      * [T-android-plan-mode] dsh plan-mode command parity:
@@ -3404,6 +3549,10 @@ class ChatViewModel(
                         messages = messages,
                         previousSummary = previousSummary,
                         provider = provider,
+                        // [T-usage-anchored-compaction] Real API count beats
+                        // chars/4 (which undercounts CJK ~4x); 0 = no usage
+                        // yet → adapter keeps the heuristic.
+                        latestContextTokens = _lastTurnContextTokens.value,
                     )
                 }.getOrNull()
                 if (!piSummary.isNullOrBlank()) {
@@ -8449,13 +8598,11 @@ class ChatViewModel(
                         if (chunk.usage.latestContextTokens > 0) {
                             lastContextTokens = chunk.usage.latestContextTokens
                         } else if (chunk.usage.inputTokens > 0) {
-                            // Fallback when a provider omits latestContextTokens: inputTokens is
-                            // now fresh-only (cached portion subtracted in the parser), so add the
-                            // cache back to recover the true context size — otherwise a high
-                            // cache-hit turn would under-report context pressure and skip offload.
-                            lastContextTokens = chunk.usage.inputTokens +
-                                (chunk.usage.cacheReadInputTokens ?: 0) +
-                                (chunk.usage.cacheCreationInputTokens ?: 0)
+                            // [T-usage-full-input-contract] Fallback when a provider omits
+                            // latestContextTokens: inputTokens is already the FULL prompt
+                            // (cache included) under the unified contract — use it verbatim.
+                            // Adding cacheRead/cacheWrite here would double-count the cache.
+                            lastContextTokens = chunk.usage.inputTokens
                         }
                         if (lastContextTokens > 0) {
                             _lastTurnContextTokens.value = lastContextTokens
@@ -9454,34 +9601,35 @@ class ChatViewModel(
             // bindMounts map and would surface another session's
             // /var/minis/{workspace,attachments,offloads,browser} files.
             ReadImageTool.NAME -> executeReadImageTool(argsJson)
+            // [T-phone-native-tool] Phone control runs the same safety gate
+            // as the offload CLIs; screenshots return pixels inline and a
+            // session offloads path for read_image.
+            com.anharness.app.tools.PhoneUseTool.NAME ->
+                com.anharness.app.tools.PhoneUseTool.execute(argsJson, activeSessionId, context)
             // [P2 #16] shell/browser/memory route through the harness-layer
             // executors (ExecutorTools) when the pilot flag is on — same
             // bodies, new home. Legacy inline executors remain as fallback
             // for a harness-layer failure; behavior is otherwise identical.
-            "shell_execute" -> executeViaHarness(
-                fallback = { executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText) },
-            ) {
-                com.anharness.app.harness.HarnessBridge.executePilotTool(
-                    name = "shell_execute",
-                    toolCallId = toolId,
-                    argsJson = argsJson,
-                    context = context,
-                    sessionId = { activeSessionId },
-                    deps = harnessExecutorDeps(),
-                    onShellLine = { line ->
-                        val idx = toolBlocks.indexOfFirst { it.id == toolId }
-                        if (idx >= 0) {
-                            val current = toolBlocks[idx].content
-                            val updated = if (current.isEmpty()) line else "$current\n$line"
-                            // Keep last 50 lines for display
-                            val trimmed = updated.lines().takeLast(50).joinToString("\n")
-                            toolBlocks[idx] = toolBlocks[idx].copy(content = trimmed)
-                            viewModelScope.launch(Dispatchers.Main) {
-                                updateAssistantMessage(assistantId, currentText, true, toolBlocks)
-                            }
-                        }
-                    },
-                )
+            "shell_execute" -> {
+                // [T-remote-backend] If this session is bound to a remote
+                // host, run the command THERE (still via RemoteShellTool's
+                // mandatory approval card). The loop stays on the phone;
+                // only the execution backend moves. Unbound → local path.
+                val boundHost = remoteBindings.boundHost(activeSessionId)
+                if (com.anharness.app.remote.ExecutionBackend.route(boundHost, "shell_execute")
+                    == com.anharness.app.remote.ExecutionBackend.Backend.REMOTE
+                ) {
+                    val shellArgs = try { org.json.JSONObject(argsJson) } catch (_: Exception) { org.json.JSONObject() }
+                    val remoteArgs = org.json.JSONObject().apply {
+                        put("tool_title", shellArgs.optString("tool_title", "Remote shell"))
+                        put("host_id", boundHost)
+                        put("command", shellArgs.optString("command", ""))
+                        if (shellArgs.has("timeout")) put("timeout", shellArgs.optInt("timeout"))
+                    }
+                    com.anharness.app.tools.RemoteShellTool.execute(remoteArgs.toString(), activeSessionId, context)
+                } else {
+                    executeShellLocal(argsJson, toolId, toolBlocks, assistantId, currentText)
+                }
             }
             "browser_use" -> executeViaHarness(
                 fallback = { executeBrowserUseTool(argsJson) },
@@ -9522,8 +9670,94 @@ class ChatViewModel(
                 )
             }
             "exit_plan_mode" -> executeExitPlanMode(argsJson)
+            // [T-subagent-app-wiring] Model-callable delegation runs through
+            // the same SubAgentRunner path as /subagent (live provider, caps,
+            // tighten-only gates). The result returns to the loop as an
+            // ordinary tool result — batch semantics untouched.
+            "spawn_subagent" -> executeSpawnSubagentTool(argsJson)
+            // [T-remote-ssh] Remote command execution (P4). Mandatory per-call
+            // approval + host-key TOFU live inside the tool/transport.
+            com.anharness.app.tools.RemoteShellTool.NAME ->
+                com.anharness.app.tools.RemoteShellTool.execute(argsJson, activeSessionId, context)
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
+    }
+
+    /**
+     * [T-remote-backend] The original local shell_execute path (harness pilot
+     * with legacy fallback), extracted so the remote-routing branch can
+     * delegate to it unchanged when the session is not bound to a host.
+     */
+    private suspend fun executeShellLocal(
+        argsJson: String,
+        toolId: String,
+        toolBlocks: MutableList<AssistantBlock>,
+        assistantId: String,
+        currentText: String,
+    ): ToolExecutionResult = executeViaHarness(
+        fallback = { executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText) },
+    ) {
+        com.anharness.app.harness.HarnessBridge.executePilotTool(
+            name = "shell_execute",
+            toolCallId = toolId,
+            argsJson = argsJson,
+            context = context,
+            sessionId = { activeSessionId },
+            deps = harnessExecutorDeps(),
+            onShellLine = { line ->
+                val idx = toolBlocks.indexOfFirst { it.id == toolId }
+                if (idx >= 0) {
+                    val current = toolBlocks[idx].content
+                    val updated = if (current.isEmpty()) line else "$current\n$line"
+                    // Keep last 50 lines for display
+                    val trimmed = updated.lines().takeLast(50).joinToString("\n")
+                    toolBlocks[idx] = toolBlocks[idx].copy(content = trimmed)
+                    viewModelScope.launch(Dispatchers.Main) {
+                        updateAssistantMessage(assistantId, currentText, true, toolBlocks)
+                    }
+                }
+            },
+        )
+    }
+
+    /**
+     * [T-subagent-app-wiring] Executor for the model-callable spawn_subagent
+     * tool. Shares the /subagent machinery (registry + guard + provider
+     * adapter) so user-invoked and model-invoked spawns land in one lineage.
+     */
+    private suspend fun executeSpawnSubagentTool(argsJson: String): ToolExecutionResult {
+        val args = try { org.json.JSONObject(argsJson) } catch (_: Exception) {
+            return ToolExecutionResult("Error: invalid spawn_subagent arguments", false)
+        }
+        val task = args.optString("task", "")
+        val toolTitle = args.optString("tool_title", "spawn_subagent")
+        if (task.isBlank()) {
+            return ToolExecutionResult("Error: 'task' is required", false, toolTitle = toolTitle)
+        }
+        val provider = currentProvider
+            ?: return ToolExecutionResult("Error: no model configured", false, toolTitle = toolTitle)
+        val sid = runCatching { ensureSession() }.getOrNull()
+        val session = com.anharness.agent.AgentSession(
+            systemPrompt = buildSystemPrompt() ?: "You are a helpful sub-agent.",
+            tools = com.anharness.app.harness.HarnessBridge.fileTools(context) { sid ?: activeSessionId },
+        )
+        val config = com.anharness.agent.AgentLoopConfig(
+            model = com.anharness.app.harness.ProviderStreamAdapter.descriptor(provider),
+            apiKey = "",
+            beforeToolCall = { subAgentGuard.before(it) },
+            afterToolCall = { subAgentGuard.after(it) },
+        )
+        val runner = com.anharness.agent.SubAgentRunner(
+            streamFn = com.anharness.app.harness.ProviderStreamAdapter.streamFn(provider),
+            registry = subAgentRegistry,
+            parentId = sid,
+        )
+        val result = runner.spawn(com.anharness.agent.SubAgentTask(task = task), session, config)
+        return ToolExecutionResult(
+            output = result.text,
+            success = !result.isError,
+            toolTitle = toolTitle,
+        )
     }
 
     /** [P2 #16] ViewModel-owned shared state the harness executors need. */
@@ -12807,6 +13041,7 @@ Plan mode is ACTIVE. You are in read-only planning mode:
         "file_write" -> "Write File"
         "file_edit" -> "Edit File"
         "browser_use" -> "Browse Web"
+        "phone_use" -> "Control Phone"
         "read_image" -> "Read Image"
         "memory_write" -> "Write Memory"
         "memory_get" -> "Read Memory"
