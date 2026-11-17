@@ -23,7 +23,11 @@ jobs:
           # (sdkmanager exit 1). Pinning to the preinstalled build skips
           # the download entirely.
           cmdline-tools-version: 11076708
-          accept-android-sdk-licenses: true
+          # [T-ci-fix] The action's own license step runs `sdkmanager
+          # --licenses` WITHOUT feeding 'y', so the interactive prompt
+          # reads EOF, defaults to N, and exits 1. Disable it and accept
+          # licenses ourselves non-interactively below.
+          accept-android-sdk-licenses: false
       - name: Accept SDK licenses (non-interactive)
         run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
       - uses: actions/setup-go@v5
@@ -68,7 +72,7 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: 11076708
-          accept-android-sdk-licenses: true
+          accept-android-sdk-licenses: false
       - name: Accept SDK licenses (non-interactive)
         run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
       - uses: actions/setup-go@v5
@@ -108,7 +112,7 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: 11076708
-          accept-android-sdk-licenses: true
+          accept-android-sdk-licenses: false
       - name: Accept SDK licenses (non-interactive)
         run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
       - name: Install NDK r28
@@ -136,7 +140,7 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: 11076708
-          accept-android-sdk-licenses: true
+          accept-android-sdk-licenses: false
       - name: Accept SDK licenses (non-interactive)
         run: yes | sdkmanager --licenses >/dev/null 2>&1 || true
       - uses: actions/setup-go@v5
