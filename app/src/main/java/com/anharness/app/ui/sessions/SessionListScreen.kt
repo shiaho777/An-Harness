@@ -1039,7 +1039,11 @@ fun SessionListScreen(
                                     onPinToggle = { viewModel.togglePin(it) },
                                     onEditRequest = { editSession = it },
                                     onExportRequest = { s, fmt ->
-                                        exportSession(context, s, chatRepository, scope, fmt)
+                                        if (fmt == "encrypted") {
+                                            exportEncryptedShare(context, s, chatRepository, scope)
+                                        } else {
+                                            exportSession(context, s, chatRepository, scope, fmt)
+                                        }
                                     },
                                     onRegenerateTitle = { viewModel.regenerateTitle(it) },
                                     onDuplicate = { viewModel.duplicateSession(it) },
@@ -1999,6 +2003,15 @@ private fun SessionItemContent(
                         onClick = {
                             showContextMenu = false
                             onExportRequest(session, "text")
+                        },
+                    )
+                    // [T-share-e2e] E2E-encrypted share file; key stays on
+                    // the device clipboard, never inside the shared file.
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.sessionlist_export_encrypted), modifier = Modifier.padding(start = 24.dp)) },
+                        onClick = {
+                            showContextMenu = false
+                            onExportRequest(session, "encrypted")
                         },
                     )
                 }
@@ -3348,6 +3361,46 @@ internal fun SessionEditSheet(
  * share sheet as a real file attachment. Peak memory stays bounded by
  * batch size regardless of session length.
  */
+/**
+ * [T-share-e2e] Export an E2E-encrypted, self-decrypting HTML share file.
+ * The key goes to the CLIPBOARD only — never into the file — and the user
+ * is told to send it separately. Sharing the file alone reveals nothing.
+ */
+private fun exportEncryptedShare(
+    context: Context,
+    session: ChatSessionEntity,
+    chatRepository: ChatRepository,
+    scope: kotlinx.coroutines.CoroutineScope,
+) {
+    scope.launch {
+        try {
+            val result = com.anharness.app.share.EncryptedShareExporter.export(context, session, chatRepository)
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("share key", result.key))
+            android.widget.Toast.makeText(
+                context,
+                context.getString(R.string.share_encrypted_key_copied),
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/html"
+                putExtra(Intent.EXTRA_SUBJECT, session.title ?: "Conversation")
+                putExtra(Intent.EXTRA_STREAM, result.uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(
+                intent, context.getString(R.string.sessionlist_export_encrypted),
+            ).apply { addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            context.startActivity(chooser)
+        } catch (t: Throwable) {
+            android.widget.Toast.makeText(
+                context, context.getString(R.string.export_progress_failed),
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+}
+
 private fun exportSession(
     context: Context,
     session: ChatSessionEntity,

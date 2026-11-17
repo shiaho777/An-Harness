@@ -474,6 +474,8 @@
     <string name="sessionlist_export">导出</string>
     <string name="sessionlist_export_json">JSON</string>
     <string name="sessionlist_export_plain">纯文本</string>
+    <string name="sessionlist_export_encrypted">加密分享（端到端）</string>
+    <string name="share_encrypted_key_copied">解密密钥已复制到剪贴板——请与文件分开发送给对方。仅凭文件无法看到任何内容。</string>
     <string name="export_summary_format">导出格式</string>
     <string name="export_summary_format_value_json">JSON</string>
     <string name="export_summary_format_value_txt">纯文本</string>
