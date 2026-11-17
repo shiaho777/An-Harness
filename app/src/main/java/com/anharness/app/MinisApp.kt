@@ -570,6 +570,12 @@ class MinisApp : Application(), ImageLoaderFactory {
             "minis-scheduled",
             com.anharness.app.sandbox.offload.ScheduledTaskOffloadHandler(this),
         )
+        // [T-remote-ssh] minis-remote — manage remote SSH hosts (P4). Secrets
+        // stored encrypted; trust-state mutations need a per-call approval.
+        NativeOffloadServer.register(
+            "minis-remote",
+            com.anharness.app.sandbox.offload.RemoteHostOffloadHandler(this),
+        )
         // T322: android-shizuku-cli — privileged Android control via Shizuku.
         // The handler short-circuits with a typed error envelope when the
         // user hasn't installed / started / authorized Shizuku, so we

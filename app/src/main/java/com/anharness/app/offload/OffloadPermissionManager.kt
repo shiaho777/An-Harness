@@ -104,6 +104,10 @@ object OffloadPermissionManager {
         // hidden: every card goes through enforceAlwaysAsk (level cannot
         // skip it), and the hard blocks live in PhoneSafetyGate, not here.
         ToolPermissionInfo("phone_control", "Phone Control", PermissionCategory.INTEGRATIONS, PermissionLevel.ASK_ONCE, showInSettings = false),
+        // [T-remote-ssh] Remote shell runs commands on ANOTHER machine —
+        // every call gets a mandatory approval card (enforceAlwaysAsk);
+        // the level cannot skip it. Hidden from Settings.
+        ToolPermissionInfo("remote_shell", "Remote Shell", PermissionCategory.INTEGRATIONS, PermissionLevel.ASK_ONCE, showInSettings = false),
     )
 
     /**

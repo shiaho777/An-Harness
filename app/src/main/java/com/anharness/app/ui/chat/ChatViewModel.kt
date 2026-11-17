@@ -9618,6 +9618,10 @@ class ChatViewModel(
             // tighten-only gates). The result returns to the loop as an
             // ordinary tool result — batch semantics untouched.
             "spawn_subagent" -> executeSpawnSubagentTool(argsJson)
+            // [T-remote-ssh] Remote command execution (P4). Mandatory per-call
+            // approval + host-key TOFU live inside the tool/transport.
+            com.anharness.app.tools.RemoteShellTool.NAME ->
+                com.anharness.app.tools.RemoteShellTool.execute(argsJson, activeSessionId, context)
             else -> ToolExecutionResult("Unknown tool: $name", false)
         }
     }

@@ -276,6 +276,12 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
 
+    // [T-remote-ssh] SSH transport for the remote-host backend (P4). sshj is
+    // pure-Java (BouncyCastle crypto), minSdk 26 compatible. slf4j-android
+    // binds sshj's logging to android.util.Log. Exact pins per AGENTS.md.
+    implementation("com.hierynomus:sshj:0.38.0")
+    implementation("org.slf4j:slf4j-android:1.7.36")
+
     // Kotlinx Serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 

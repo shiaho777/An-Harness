@@ -60,6 +60,9 @@ object AgentTools {
         // routes through the core SubAgentRunner (depth/concurrency caps,
         // tighten-only gates) on the live provider.
         add(spawnSubagentDefinition())
+        // [T-remote-ssh] Remote command execution (P4). Every call needs a
+        // mandatory approval card; host-key TOFU enforced by the transport.
+        add(RemoteShellTool.definition())
     }.let { tools ->
         if (enabledTools == null) tools else tools.filter { it.name in enabledTools }
     }
