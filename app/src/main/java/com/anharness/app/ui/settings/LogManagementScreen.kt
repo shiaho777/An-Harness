@@ -2,6 +2,7 @@ package com.anharness.app.ui.settings
 
 import com.anharness.app.R
 import com.anharness.app.ui.components.MinisTextButton
+import kotlinx.coroutines.launch
 
 import android.content.Context
 import android.content.Intent
@@ -128,6 +129,32 @@ fun LogManagementScreen(
         onBack = onBack,
         scrollable = false,
     ) {
+        // [T-diag-redaction] Sanitized diagnostics bundle: every log line
+        // passes the redactor, credential files are excluded, and the user
+        // shares the zip explicitly — nothing is uploaded automatically.
+        val diagScope = androidx.compose.runtime.rememberCoroutineScope()
+        androidx.compose.material3.TextButton(
+            onClick = {
+                diagScope.launch {
+                    runCatching {
+                        val uri = com.anharness.app.diagnostics.DiagnosticsBundle.build(context)
+                        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                            type = "application/zip"
+                            putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        context.startActivity(
+                            android.content.Intent.createChooser(intent, context.getString(R.string.diag_bundle_share))
+                                .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                        )
+                    }.onFailure {
+                        android.widget.Toast.makeText(context, it.message ?: "bundle failed", android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        ) { Text(stringResource(R.string.diag_bundle_export)) }
+
         // Segmented selector lives outside the scrolling content so the
         // tabs stay visible as the body scrolls.
         SingleChoiceSegmentedButtonRow(

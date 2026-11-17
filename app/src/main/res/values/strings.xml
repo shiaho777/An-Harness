@@ -748,6 +748,9 @@
     <string name="env_var_error_duplicate">A variable with this name already exists</string>
     <string name="log_title">Logs</string>
     <string name="log_share_all">Share All</string>
+    <!-- [T-diag-redaction] Sanitized diagnostics bundle. -->
+    <string name="diag_bundle_export">Export sanitized diagnostics bundle</string>
+    <string name="diag_bundle_share">Share diagnostics (credentials redacted)</string>
     <string name="log_section_logging">Logging</string>
     <string name="log_section_logging_footer">When enabled, all console output is captured to daily log files in the app\'s private storage.</string>
     <string name="log_enable_switch">Enable Logging</string>

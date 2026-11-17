@@ -671,6 +671,8 @@
     <string name="env_var_error_duplicate">同名变量已存在</string>
     <string name="log_title">日志</string>
     <string name="log_share_all">全部分享</string>
+    <string name="diag_bundle_export">导出脱敏诊断包</string>
+    <string name="diag_bundle_share">分享诊断包（凭据已脱敏）</string>
     <string name="log_section_logging">日志</string>
     <string name="log_section_logging_footer">启用后，所有控制台输出将每天捕获到应用私有存储中的日志文件。</string>
     <string name="log_enable_switch">启用日志</string>
