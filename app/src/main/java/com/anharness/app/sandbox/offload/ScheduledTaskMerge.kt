@@ -66,6 +66,19 @@ internal object ScheduledTaskMerge {
             else -> old.enabled
         }
 
+        // [T-scheduled-rrule] --rrule sets/validates; --rrule none clears
+        // back to the legacy repeatMode path; absent keeps the old rule.
+        val rrule = when (val raw = args.get("rrule")) {
+            null -> old.rrule
+            "none", "" -> null
+            else -> {
+                runCatching { com.anharness.app.scheduled.Rrule.parse(raw) }.getOrElse { e ->
+                    throw IllegalArgumentException("--rrule invalid: ${e.message}")
+                }
+                raw
+            }
+        }
+
         return old.copy(
             label = args.get("label", "l") ?: old.label,
             timeOfDayHour = time?.first ?: old.timeOfDayHour,
@@ -80,6 +93,7 @@ internal object ScheduledTaskMerge {
             enabled = enabled,
             startDateMs = args.get("start")?.let(parseDate) ?: old.startDateMs,
             endDateMs = args.get("end")?.let(parseDate) ?: old.endDateMs,
+            rrule = rrule,
             // id / createdAt / modelBinding / lastFiredAt / lastResult* /
             // runHistory intentionally untouched — copy() keeps them.
         )
