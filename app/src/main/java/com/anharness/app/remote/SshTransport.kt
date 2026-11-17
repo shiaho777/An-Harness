@@ -142,6 +142,46 @@ object SshTransport {
         }
     }
 
+    /**
+     * [T-remote-session] Open a connected, host-key-verified, authenticated
+     * SSHClient and hand it to the caller (who owns closing it). Reuses the
+     * same TOFU + auth path as [exec]/[probe]; throws SecurityException on a
+     * host-key mismatch. Used by SshSessionTransport to run a long-lived
+     * session-server channel over the encrypted link.
+     *
+     * On first connect (no pin) the observed fingerprint is returned via
+     * [onFirstPin] so the caller can persist it; the caller MUST pin it to
+     * keep TOFU meaningful across reconnects.
+     */
+    suspend fun openVerifiedClient(
+        host: RemoteHostConfig.Host,
+        secret: String,
+        timeoutS: Int = RemoteHostConfig.DEFAULT_TIMEOUT_S,
+        onFirstPin: ((String) -> Unit)? = null,
+    ): SSHClient = withContext(Dispatchers.IO) {
+        val client = SSHClient()
+        try {
+            configure(client, host, timeoutS)
+            val verifier = PinningVerifier(host.pinnedFingerprint)
+            client.addHostKeyVerifier(verifier)
+            client.connect(host.hostname, host.port)
+            if (verifier.mismatch != null) {
+                throw SecurityException(
+                    "SSH host key changed for ${host.hostname} — possible MITM. " +
+                        "Expected ${host.pinnedFingerprint}, got ${verifier.mismatch}.",
+                )
+            }
+            authenticate(client, host, secret)
+            if (host.pinnedFingerprint == null) {
+                verifier.seenFingerprint?.let { onFirstPin?.invoke(it) }
+            }
+            client
+        } catch (e: Exception) {
+            runCatching { client.disconnect() }
+            throw e
+        }
+    }
+
     // ── internals ────────────────────────────────────────────────────────
 
     private fun configure(client: SSHClient, host: RemoteHostConfig.Host, timeoutS: Int) {
