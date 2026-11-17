@@ -144,8 +144,45 @@ PR #20（feat/p4-remote-session）切片 4：
   小间隙增量/大间隙全量）；SshSessionTransport 跑在加密 TOFU SSH
   exec 通道上；SshTransport.openVerifiedClient 复用验证连接。15 单测。
 
-P4 剩余：
-- 远程会话 SERVER 二进制（在主机上跑循环；客户端/协议/传输抽象已就位）。
-- Noise/WebRTC 传输后端（可选，用于免 SSH 中继；SSH 本身已强加密+
-  主机认证，故按可插拔传输抽象延后，不手写安全敏感的 Noise 栈）。
-- UI 接线：在聊天中渲染远程会话。
+PR #20 切片 5+6（2026-11-17）：
+- 远程会话 SERVER：assets/remote/minis-session-server.py（纯标准库
+  python3，主机零依赖部署）。OpenAI 兼容 chat-completions 循环 +
+  主机侧 shell 工具（超时 124、50k 头尾截断）、限轮数、可停止、
+  序列号事件 + 快照 + resync（日志淘汰自动快照愈合）。折叠语义与
+  Kotlin 客户端逐条对齐。23 个 python unittest（假 LLM/shell，无网络）。
+- minis-remote deploy：上传服务端 + chmod + 符号链接，强制审批；
+  SshTransport.uploadTextFile 复用验证连接。
+- /remote session <hostId>：强制审批后连接远端引擎，折叠状态渲染进
+  聊天消息（running/idle、工具结果、错误），断线自动重连 ≤5 次退避；
+  /remote session send、/remote stop、/remote off。
+
+P4 剩余（明确延后）：
+- Noise/WebRTC 传输后端：SSH 已强加密+主机认证（TOFU），该后端仅
+  服务免 SSH 中继场景；SessionTransport 抽象已就位，届时插入即可，
+  不现在手写安全敏感的 Noise 栈。
+- 远程引擎的完整工具面（文件/浏览器等）与多会话并发：当前服务端
+  仅 shell 工具、单会话，属后续增强。
+
+## P5 已落地（2026-11-17，PR #20）
+
+- RRULE 定时重复（RFC 5545 子集）：DAILY/WEEKLY/MONTHLY/YEARLY +
+  INTERVAL/BYDAY/BYMONTHDAY/COUNT/UNTIL；不支持的部分显式拒绝，
+  绝不按错误日期触发；COUNT 从序列起点计数（测试抓出的真缺陷）。
+  create/update --rrule，update --rrule none 清除。17 单测。
+- 端到端加密会话分享：AES-256-GCM 设备端加密，自解密 HTML（WebCrypto，
+  与 Kotlin 字节兼容），密钥只进剪贴板绝不进文件；防篡改/截断/错钥
+  全部失败为 null。9 单测。托管链接模式可复用 EncryptedShare。
+- 诊断脱敏打包：保守脱敏规则（凭据/令牌/JWT/邮箱/电话/家目录），
+  凭据类文件名直接排除，2MB/16MB 上限，用户显式分享不自动上传。
+  12 单测。
+- 沙箱资产清单 + 启动哈希校验：23 个资产 SHA-256 钉住，python 生成器
+  与 Kotlin 校验器互操作测试；漂移即跳过覆盖并告警，不静默执行被改
+  代码。8 单测。
+
+P5 明确不做/延后（取舍记录）：
+- 归档可撤销/安全删除：需 DB 迁移与回收站语义，独立切片。
+- 主题+壁纸取色、平板自适应：纯 UI 工程，独立切片。
+- 附件规格（每条 ≤9、单文件 200MB）：现有管线已有预算制，规格对齐
+  属产品决策。
+- 插件声明式 UI + 市场、酒馆/桌宠：生态/娱乐向，按产品定位默认不做。
+- rootfs 分层升级事务 + SafeMode：涉及安装器重构，独立立项。
