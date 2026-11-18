@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "path": "default_mount/etc/hostname",
+      "sha256": "89d23dab37f3e2e24e4581c7c1a63d186d5e38374d34dac158a5a9be1bf10c13",
+      "size": 6
+    },
+    {
+      "path": "default_mount/etc/pip/pip.conf",
+      "sha256": "36e57a2846a0c36b9318da84f15c93ece479e134d58aecd5b59212a5f576bdc4",
+      "size": 38
+    },
+    {
+      "path": "default_mount/etc/profile.d/minis.sh",
+      "sha256": "b64ccc652e8a79ec72467579015ac8567ab9ee521c283a0c8613597f9cee3ba1",
+      "size": 1585
+    },
+    {
+      "path": "default_mount/root/.ashrc",
+      "sha256": "3a49f9fe813ee00034cdd958744328a5b2b11edb34a1999b278f8ea7db0973f9",
+      "size": 221
+    },
+    {
+      "path": "default_mount/usr/local/bin/gnome-open",
+      "sha256": "3ee1d1f6ccd0cabee8e3211116dec47260b58f7e4d5d381cf75114cb44c369ad",
+      "size": 179
+    },
+    {
+      "path": "default_mount/usr/local/bin/kde-open",
+      "sha256": "7accd97131c2bab068becc74e91dd2d70336a3d6517b8ce7518c6831de8c1d1c",
+      "size": 177
+    },
+    {
+      "path": "default_mount/usr/local/bin/minis-mcp-cli",
+      "sha256": "2cdc9bc60116282e3659d37f62273eaf7f795c9723785150507b87710bfcceb6",
+      "size": 1267
+    },
+    {
+      "path": "default_mount/usr/local/bin/minis-open",
+      "sha256": "424bc797752ab45c9d1d93b54ecd37c3927322fd9f26347b68e4ab0aa0c3dbe8",
+      "size": 3263
+    },
+    {
+      "path": "default_mount/usr/local/bin/sensible-browser",
+      "sha256": "2684ffabe83c71cd326ce8a766cff68bae4af14930554dff78daafce81bf9806",
+      "size": 188
+    },
+    {
+      "path": "default_mount/usr/local/bin/www-browser",
+      "sha256": "0bed1efc707c3c40b4dbc2a25bc60ae5716975b36a28003cdf6cdeab8d524f18",
+      "size": 180
+    },
+    {
+      "path": "default_mount/usr/local/bin/x-www-browser",
+      "sha256": "b09d701eec230aa69ce399015a228db7cfcdc1f61a31a738f94f402678914141",
+      "size": 182
+    },
+    {
+      "path": "default_mount/usr/local/bin/xdg-open",
+      "sha256": "bacfd4733192acca34de11c4b81c856ac3a7d01670266b72d9831494da7a8406",
+      "size": 180
+    },
+    {
+      "path": "default_mount/usr/local/lib/minis-mcp-cli/daemon.py",
+      "sha256": "c9c083ffaffd3c4faf2d8b3b8447a1bcaf14c82feb9fdc7a7c4602a5bed494da",
+      "size": 21110
+    },
+    {
+      "path": "default_mount/usr/local/lib/minis-mcp-cli/main.py",
+      "sha256": "0503346b549b796adef09c526e9703730dfca79fd39cef5b0f11d026292ac731",
+      "size": 26455
+    },
+    {
+      "path": "default_mount/usr/local/lib/minis-mcp-cli/test_http_reinit.py",
+      "sha256": "5bd9aa5c4719775c0d6030c210118557f38a374a971b378eabe0119255ce12de",
+      "size": 12104
+    },
+    {
+      "path": "default_mount/usr/local/lib/minis-mcp-cli/test_startup_timeout.py",
+      "sha256": "8a774a00b67d2c3d38eb9037424ff14b10b1275bbf9b8b21bd881b8d496b5cbc",
+      "size": 8001
+    },
+    {
+      "path": "default_mount/usr/local/lib/minis-mcp-cli/transport/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    {
+      "path": "default_mount/usr/local/lib/minis-mcp-cli/transport/http.py",
+      "sha256": "a7ab0628db5ef6e4290147c2f4b008f90bf93b2f8deca828c0e104f65c64534b",
+      "size": 15724
+    },
+    {
+      "path": "default_mount/usr/local/lib/minis-mcp-cli/transport/stdio.py",
+      "sha256": "5cd5f22b88450d22ea31d57974438ada39c497c9dbfe189fe8d69830d465ba16",
+      "size": 5259
+    },
+    {
+      "path": "default_mount/usr/local/lib/minis-mcp-cli/utils/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    {
+      "path": "default_mount/usr/local/lib/minis-mcp-cli/utils/config.py",
+      "sha256": "580f4dcb04f44e63a37d3c44ef820d895868bf841cdbc4b2ef2bbeea70bc8cd9",
+      "size": 5853
+    },
+    {
+      "path": "default_mount/usr/local/lib/minis-mcp-cli/utils/deps.py",
+      "sha256": "6cf02fd11ae3d4cbd2e15f047597c420ce6a3c522b7e584e8a16090b9a339614",
+      "size": 2470
+    },
+    {
+      "path": "remote/minis-session-server.py",
+      "sha256": "37a6b3e7ce9f79c77426c91a81e36e13552395052562d11e4e6f26e7be608712",
+      "size": 11205
+    }
+  ]
+}

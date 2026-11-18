@@ -133,6 +133,10 @@ data class ScheduledTask(
     // "Run records" menu opens a screen backed by this. Capped at
     // MAX_RUN_HISTORY by the manager when appending.
     val runHistory: List<ScheduledRun> = emptyList(),
+    // [T-scheduled-rrule] Optional RFC-5545 RRULE subset (dsh parity). When
+    // set, it overrides repeatMode/customDays for next-trigger computation.
+    // Null/blank → legacy repeatMode path, byte-identical behavior.
+    val rrule: String? = null,
 ) {
 
     /**
@@ -151,6 +155,28 @@ data class ScheduledTask(
         // Earliest instant we may fire: max(now, start-of-startDate). This lets
         // a task created today with a future startDate wait until that day.
         val floor = maxOf(now, startDateMs ?: Long.MIN_VALUE)
+
+        // [T-scheduled-rrule] An explicit RRULE overrides repeatMode/customDays.
+        // Parse failures yield "no next trigger" rather than a wrong-day fire;
+        // the CLI validates rules at create/update time.
+        val ruleText = rrule
+        if (!ruleText.isNullOrBlank()) {
+            val rule = runCatching { Rrule.parse(ruleText) }.getOrNull() ?: return null
+            val candidate = Rrule.nextOccurrence(
+                rule, timeOfDayHour, timeOfDayMinute,
+                floorMs = floor, anchorMs = startDateMs ?: createdAt,
+            ) ?: return null
+            val endBound = endDateMs
+            if (endBound != null) {
+                val endOfDay = Calendar.getInstance().apply {
+                    timeInMillis = endBound
+                    set(Calendar.HOUR_OF_DAY, 23); set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59); set(Calendar.MILLISECOND, 999)
+                }.timeInMillis
+                if (candidate > endOfDay) return null
+            }
+            return candidate
+        }
 
         val cal = Calendar.getInstance().apply {
             timeInMillis = floor
@@ -210,6 +236,7 @@ data class ScheduledTask(
         put("minute", timeOfDayMinute)
         put("repeatMode", repeatMode.name)
         put("customDays", customDays.joinToString(","))
+        if (!rrule.isNullOrBlank()) put("rrule", rrule)
         put("prompt", prompt)
         put("targetMode", targetMode.encode())
         if (modelId != null) put("modelId", modelId)
@@ -240,6 +267,7 @@ data class ScheduledTask(
             }.getOrDefault(ScheduledRepeatMode.ONCE),
             customDays = o.optString("customDays", "")
                 .split(',').mapNotNull { it.trim().toIntOrNull() }.toSet(),
+            rrule = o.optString("rrule", "").takeIf { it.isNotBlank() },
             prompt = o.optString("prompt", ""),
             targetMode = ScheduledTargetMode.decode(o.optString("targetMode", null)),
             modelId = if (o.has("modelId")) o.optString("modelId", null) else null,

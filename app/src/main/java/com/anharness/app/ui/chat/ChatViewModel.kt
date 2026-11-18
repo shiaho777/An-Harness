@@ -2148,15 +2148,44 @@ class ChatViewModel(
                 val boundLabel = bound?.let { id -> manager.get(id)?.label ?: id }
                 val list = if (hosts.isEmpty()) "  (none — add via minis-remote add)"
                 else hosts.joinToString("\n") { "  • ${it.id}  ${it.label} (${it.username}@${it.hostname})" }
+                val engine = remoteSessionClient?.let { "RUNNING" } ?: "off"
                 appendSystemInfo(
                     "Execution backend: " + (boundLabel?.let { "REMOTE ($it)" } ?: "LOCAL") +
-                        "\nHosts:\n$list\nBind with /remote <hostId>, unbind with /remote off.",
+                        "\nRemote engine: $engine" +
+                        "\nHosts:\n$list\nBind shell: /remote <hostId> · run engine: /remote session <hostId> · stop: /remote off.",
                     "remote",
                 )
             }
             trimmed.equals("off", true) || trimmed.equals("local", true) -> {
                 remoteBindings.unbind(sid)
-                appendSystemInfo("Execution backend set to LOCAL (phone sandbox).", "remote")
+                stopRemoteSession()
+                appendSystemInfo("Execution backend set to LOCAL (phone sandbox); remote engine stopped.", "remote")
+            }
+            trimmed.startsWith("session", true) -> {
+                val rest = trimmed.removePrefix("session").trim()
+                if (rest.isEmpty() || rest.equals("off", true)) {
+                    stopRemoteSession()
+                    appendSystemInfo("Remote engine stopped.", "remote")
+                } else if (rest.startsWith("send ", true)) {
+                    val text = rest.removePrefix("send ").trim()
+                    val client = remoteSessionClient
+                    if (client == null) {
+                        appendSystemInfo("No remote engine running. Start with /remote session <hostId>.", "remote")
+                    } else if (text.isNotEmpty()) {
+                        viewModelScope.launch(Dispatchers.IO) {
+                            runCatching { client.send(text) }.onFailure {
+                                appendSystemInfo("Remote send failed: ${it.message}", "remote")
+                            }
+                        }
+                    }
+                } else {
+                    startRemoteSession(rest, manager)
+                }
+            }
+            trimmed.equals("stop", true) -> {
+                val client = remoteSessionClient
+                if (client == null) appendSystemInfo("No remote engine running.", "remote")
+                else viewModelScope.launch(Dispatchers.IO) { runCatching { client.stop() } }
             }
             else -> {
                 val host = manager.get(trimmed)
@@ -2253,6 +2282,117 @@ class ChatViewModel(
 
     /** [T-remote-backend] Per-session remote-host binding for shell routing. */
     private val remoteBindings = com.anharness.app.remote.ExecutionBackend.Bindings(context)
+
+    // ── remote engine session (P4 slice 6) ───────────────────────────────
+
+    private var remoteSessionClient: com.anharness.app.remote.session.RemoteSessionClient? = null
+    private var remoteSessionJob: Job? = null
+    private var remoteSessionMessageId: String? = null
+    private var remoteSessionHostLabel: String? = null
+
+    /**
+     * [T-remote-session] Start the remote ENGINE on a host: the agent loop
+     * runs there (minis-session-server), the phone renders the folded
+     * state. Connecting executes a process on another machine → mandatory
+     * approval card. The link auto-reconnects (bounded) via the tested
+     * resync client; /remote off tears it down.
+     */
+    private fun startRemoteSession(hostId: String, manager: com.anharness.app.remote.RemoteHostManager) {
+        val host = manager.get(hostId)
+        if (host == null) {
+            appendSystemInfo("No remote host with id '$hostId'. Use /remote to list hosts.", "remote")
+            return
+        }
+        val secret = manager.loadSecret(hostId)
+        if (secret == null) {
+            appendSystemInfo("Host '${host.label}' has no stored credential.", "remote")
+            return
+        }
+        if (remoteSessionClient != null) {
+            appendSystemInfo("Remote engine already running on $remoteSessionHostLabel. /remote off first.", "remote")
+            return
+        }
+        val sid = activeSessionId
+        val approved = kotlinx.coroutines.runBlocking {
+            com.anharness.app.offload.OffloadPermissionManager.enforceAlwaysAsk(
+                "remote_shell", "Start remote agent engine on ${host.label}", sid,
+            )
+        }
+        if (!approved) {
+            appendSystemInfo("Remote engine start was not approved.", "remote")
+            return
+        }
+        remoteSessionHostLabel = host.label
+        val msgId = "remote_session_${System.currentTimeMillis()}"
+        remoteSessionMessageId = msgId
+        _messages.value = _messages.value + ChatMessage(
+            id = msgId, role = "assistant",
+            content = "Connecting to remote engine on ${host.label}…",
+        )
+        fun transport() = com.anharness.app.remote.session.SshSessionTransport(host, secret)
+        val client = com.anharness.app.remote.session.RemoteSessionClient(
+            transport = transport(),
+            onState = { state -> renderRemoteSessionState(msgId, host.label, state) },
+            reconnectTransport = { transport() },
+        )
+        remoteSessionClient = client
+        remoteSessionJob = viewModelScope.launch(Dispatchers.IO) {
+            var attempts = 0
+            while (isActive && attempts < 5) {
+                try {
+                    if (attempts == 0) client.run() else client.reconnect()
+                    break // clean close
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    attempts++
+                    AppLogger.warning(TAG, "remote engine link dropped (${e.message}); attempt $attempts/5")
+                    if (attempts >= 5) {
+                        appendSystemInfo("Remote engine link lost after 5 reconnect attempts: ${e.message}", "remote")
+                        break
+                    }
+                    kotlinx.coroutines.delay(1000L * attempts)
+                }
+            }
+        }
+        appendSystemInfo(
+            "Remote engine starting on ${host.label}. Send with /remote session send <text>; stop the turn with /remote stop; disconnect with /remote off. Deploy first via minis-remote deploy --id $hostId.",
+            "remote",
+        )
+    }
+
+    /** Render the folded remote state into the pinned assistant message. */
+    private fun renderRemoteSessionState(
+        msgId: String,
+        hostLabel: String,
+        state: com.anharness.app.remote.session.RemoteSessionProtocol.SessionState,
+    ) {
+        val text = buildString {
+            append("🖥 Remote engine · ").append(hostLabel)
+            append(if (state.running) " · running" else " · idle").append("\n\n")
+            state.messages.forEach { m ->
+                when {
+                    m.role == "user" -> append("You: ").append(m.text).append("\n\n")
+                    m.toolName != null -> append("[").append(m.toolName).append(if (m.isError) " ✗" else "").append("] ").append(m.text.take(500)).append("\n\n")
+                    else -> append(m.text).append("\n\n")
+                }
+            }
+            state.lastError?.let { append("⚠ ").append(it) }
+        }
+        viewModelScope.launch(Dispatchers.Main) {
+            _messages.value = _messages.value.map {
+                if (it.id == msgId) it.copy(content = text) else it
+            }
+        }
+    }
+
+    private fun stopRemoteSession() {
+        remoteSessionJob?.cancel()
+        remoteSessionJob = null
+        val client = remoteSessionClient ?: return
+        remoteSessionClient = null
+        viewModelScope.launch(Dispatchers.IO) { runCatching { client.close() } }
+    }
 
     /**
      * [T-android-plan-mode] dsh plan-mode command parity:

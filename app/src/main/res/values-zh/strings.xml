@@ -474,6 +474,8 @@
     <string name="sessionlist_export">导出</string>
     <string name="sessionlist_export_json">JSON</string>
     <string name="sessionlist_export_plain">纯文本</string>
+    <string name="sessionlist_export_encrypted">加密分享（端到端）</string>
+    <string name="share_encrypted_key_copied">解密密钥已复制到剪贴板——请与文件分开发送给对方。仅凭文件无法看到任何内容。</string>
     <string name="export_summary_format">导出格式</string>
     <string name="export_summary_format_value_json">JSON</string>
     <string name="export_summary_format_value_txt">纯文本</string>
@@ -669,6 +671,8 @@
     <string name="env_var_error_duplicate">同名变量已存在</string>
     <string name="log_title">日志</string>
     <string name="log_share_all">全部分享</string>
+    <string name="diag_bundle_export">导出脱敏诊断包</string>
+    <string name="diag_bundle_share">分享诊断包（凭据已脱敏）</string>
     <string name="log_section_logging">日志</string>
     <string name="log_section_logging_footer">启用后，所有控制台输出将每天捕获到应用私有存储中的日志文件。</string>
     <string name="log_enable_switch">启用日志</string>

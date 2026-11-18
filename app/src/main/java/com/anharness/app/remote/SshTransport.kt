@@ -142,6 +142,84 @@ object SshTransport {
         }
     }
 
+    /**
+     * [T-remote-session] Upload a text file to the host via `cat > path`
+     * over an exec channel's stdin. Parent dirs are created. Used by
+     * `minis-remote deploy` to push the session-server script. Same
+     * verified connection path as everything else.
+     */
+    suspend fun uploadTextFile(
+        host: RemoteHostConfig.Host,
+        secret: String,
+        remotePath: String,
+        content: String,
+        timeoutS: Int = RemoteHostConfig.DEFAULT_TIMEOUT_S,
+        onFirstPin: ((String) -> Unit)? = null,
+    ): Int = withContext(Dispatchers.IO) {
+        val client = openVerifiedClient(host, secret, timeoutS, onFirstPin)
+        try {
+            client.startSession().use { session ->
+                // Path is single-quoted for the remote shell; embedded
+                // quotes are escaped the POSIX way ('\'').
+                val quoted = "'" + remotePath.replace("'", "'\\''") + "'"
+                val dir = remotePath.substringBeforeLast('/', "")
+                val mkdir = if (dir.isNotEmpty()) {
+                    "mkdir -p '" + dir.replace("'", "'\\''") + "' && "
+                } else ""
+                val cmd = session.exec(mkdir + "cat > " + quoted)
+                cmd.outputStream.use { it.write(content.toByteArray(Charsets.UTF_8)); it.flush() }
+                try {
+                    cmd.join(timeoutS.toLong(), TimeUnit.SECONDS)
+                } catch (_: Exception) {
+                    return@use 124
+                }
+                cmd.exitStatus ?: -1
+            }
+        } finally {
+            runCatching { client.disconnect() }
+        }
+    }
+
+    /**
+     * [T-remote-session] Open a connected, host-key-verified, authenticated
+     * SSHClient and hand it to the caller (who owns closing it). Reuses the
+     * same TOFU + auth path as [exec]/[probe]; throws SecurityException on a
+     * host-key mismatch. Used by SshSessionTransport to run a long-lived
+     * session-server channel over the encrypted link.
+     *
+     * On first connect (no pin) the observed fingerprint is returned via
+     * [onFirstPin] so the caller can persist it; the caller MUST pin it to
+     * keep TOFU meaningful across reconnects.
+     */
+    suspend fun openVerifiedClient(
+        host: RemoteHostConfig.Host,
+        secret: String,
+        timeoutS: Int = RemoteHostConfig.DEFAULT_TIMEOUT_S,
+        onFirstPin: ((String) -> Unit)? = null,
+    ): SSHClient = withContext(Dispatchers.IO) {
+        val client = SSHClient()
+        try {
+            configure(client, host, timeoutS)
+            val verifier = PinningVerifier(host.pinnedFingerprint)
+            client.addHostKeyVerifier(verifier)
+            client.connect(host.hostname, host.port)
+            if (verifier.mismatch != null) {
+                throw SecurityException(
+                    "SSH host key changed for ${host.hostname} — possible MITM. " +
+                        "Expected ${host.pinnedFingerprint}, got ${verifier.mismatch}.",
+                )
+            }
+            authenticate(client, host, secret)
+            if (host.pinnedFingerprint == null) {
+                verifier.seenFingerprint?.let { onFirstPin?.invoke(it) }
+            }
+            client
+        } catch (e: Exception) {
+            runCatching { client.disconnect() }
+            throw e
+        }
+    }
+
     // ── internals ────────────────────────────────────────────────────────
 
     private fun configure(client: SSHClient, host: RemoteHostConfig.Host, timeoutS: Int) {

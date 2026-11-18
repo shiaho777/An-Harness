@@ -126,6 +126,13 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
         if (target !is ScheduledTargetMode.RerunMessage && prompt.isBlank()) {
             throw IllegalArgumentException("--prompt required (except for rerun target)")
         }
+        // [T-scheduled-rrule] Validate at the boundary so a bad rule fails
+        // loudly at create time instead of silently never firing.
+        val rrule = args.get("rrule")?.also {
+            runCatching { com.anharness.app.scheduled.Rrule.parse(it) }.getOrElse { e ->
+                throw IllegalArgumentException("--rrule invalid: ${e.message}")
+            }
+        }
         val task = ScheduledTask(
             label = label,
             timeOfDayHour = hour,
@@ -138,6 +145,7 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
             enabled = !args.hasFlag("disabled"),
             startDateMs = args.get("start")?.let { parseDate(it) },
             endDateMs = args.get("end")?.let { parseDate(it) },
+            rrule = rrule,
         )
         manager.create(task)
         val out = JSONObject().put("created", taskJson(task))
@@ -267,6 +275,7 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
         put("time", "%02d:%02d".format(t.timeOfDayHour, t.timeOfDayMinute))
         put("repeat", t.repeatMode.name.lowercase())
         if (t.customDays.isNotEmpty()) put("days", JSONArray(t.customDays.toList()))
+        if (!t.rrule.isNullOrBlank()) put("rrule", t.rrule)
         put("prompt", t.prompt)
         put("target", t.targetMode.encode())
         if (t.modelId != null) put("model", t.modelId)
@@ -288,6 +297,9 @@ class ScheduledTaskOffloadHandler(private val context: Context) : NativeOffloadH
             list
             create --time HH:MM --prompt "..." [--label L]
                    [--repeat once|daily|weekdays|custom --days mon,tue,...]
+                   [--rrule "FREQ=WEEKLY;BYDAY=MO,WE,FR;INTERVAL=2"]  (overrides --repeat;
+                     DAILY/WEEKLY/MONTHLY/YEARLY + INTERVAL/BYDAY/BYMONTHDAY/COUNT/UNTIL;
+                     update --rrule none clears it)
                    [--target new|follow-up|rerun --session <id> --message <id>]
                    [--model <modelId>] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--disabled]
             update --id <taskId> [any create flag] [--enabled|--disabled]
